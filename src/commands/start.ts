@@ -186,6 +186,8 @@ async function runSingleTunnel(
     onConnected() {
       if (wasConnected) {
         ui.success("Reconnected to CatchHook.");
+      } else {
+        ui.success("Connected! Listening for webhooks...");
       }
       wasConnected = true;
     },
@@ -228,6 +230,8 @@ async function runMultiTunnel(
     onConnected() {
       if (wasConnected) {
         ui.success("Reconnected to CatchHook.");
+      } else {
+        ui.success("Connected! Listening for webhooks...");
       }
       wasConnected = true;
     },

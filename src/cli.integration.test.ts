@@ -86,15 +86,13 @@ describe("CLI integration", () => {
 
   describe("anonymous shorthand (ep_xxx --key)", () => {
     it("parses --key and --port after the endpoint ID", () => {
-      // This should attempt to connect (and fail), but it proves Commander
-      // parsed the options correctly rather than silently exiting.
-      const { stdout, exitCode } = runCli([
+      const { stdout } = runCli([
         "ep_test123", "--key", "tkey_fake", "--port", "9999",
       ]);
-      // The CLI should produce output (banner + connection attempt / error),
-      // NOT exit silently with code 0.
-      expect(stdout.length).toBeGreaterThan(0);
-      expect(stdout).toContain("catchhook");
+      // The banner only appears when options are parsed and startCommand runs.
+      // If options were swallowed, we'd see "Missing --key flag" instead.
+      expect(stdout).not.toContain("Missing --key");
+      expect(stdout).toContain("9999");
     });
 
     it("shows error when endpoint ID is given without --key", () => {

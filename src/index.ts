@@ -10,6 +10,12 @@ import { endpointsCommand } from "./commands/endpoints.js";
 import { startCommand } from "./commands/start.js";
 import * as ui from "./lib/ui.js";
 
+process.on("unhandledRejection", (err: any) => {
+  const msg = err?.message || String(err);
+  ui.error(msg);
+  process.exit(1);
+});
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
 const VERSION: string = pkg.version;
