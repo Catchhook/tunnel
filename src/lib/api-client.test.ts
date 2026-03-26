@@ -1,0 +1,278 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { ApiClient, getAnonymousTunnelTicket, reportAnonymousDelivery } from "./api-client.js";
+
+// Mock global fetch
+const mockFetch = vi.fn();
+vi.stubGlobal("fetch", mockFetch);
+
+function jsonResponse(data: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? "OK" : "Error",
+    json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
+  };
+}
+
+describe("ApiClient", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    client = new ApiClient("chk_test_token", "catchhook.localhost:3100");
+  });
+
+  describe("constructor", () => {
+    it("builds correct base URL for localhost", () => {
+      const localClient = new ApiClient("tok", "catchhook.localhost:3100");
+      mockFetch.mockResolvedValueOnce(jsonResponse({ data: {} }));
+      localClient.verify();
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://catchhook.localhost:3100/api/v1/auth/verify",
+        expect.any(Object)
+      );
+    });
+
+    it("builds correct base URL for production", () => {
+      const prodClient = new ApiClient("tok", "catchhook.app");
+      mockFetch.mockResolvedValueOnce(jsonResponse({ data: {} }));
+      prodClient.verify();
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://catchhook.app/api/v1/auth/verify",
+        expect.any(Object)
+      );
+    });
+  });
+
+  describe("verify", () => {
+    it("sends GET to /api/v1/auth/verify with bearer token", async () => {
+      const responseData = {
+        data: {
+          user: { id: "u_1", email: "test@example.com", name: "Test" },
+          account: { id: "a_1", name: "Test Account", plan: "pro" },
+        },
+      };
+      mockFetch.mockResolvedValueOnce(jsonResponse(responseData));
+
+      const result = await client.verify();
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://catchhook.localhost:3100/api/v1/auth/verify",
+        expect.objectContaining({
+          method: "GET",
+          headers: expect.objectContaining({
+            Authorization: "Bearer chk_test_token",
+            "Content-Type": "application/json",
+          }),
+        })
+      );
+      expect(result.data.user.email).toBe("test@example.com");
+    });
+
+    it("throws on non-ok response", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+        text: () => Promise.resolve("Invalid token"),
+      });
+
+      await expect(client.verify()).rejects.toThrow("API error 401: Invalid token");
+    });
+  });
+
+  describe("listEndpoints", () => {
+    it("returns endpoints data", async () => {
+      const endpoints = {
+        data: [
+          { id: "ep_1", name: "Test", custom_id: null, webhook_url: "http://...", tunnel_active: false, created_at: "", updated_at: "" },
+        ],
+      };
+      mockFetch.mockResolvedValueOnce(jsonResponse(endpoints));
+
+      const result = await client.listEndpoints();
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].id).toBe("ep_1");
+    });
+  });
+
+  describe("createEndpoint", () => {
+    it("sends POST with endpoint name", async () => {
+      const newEp = { data: { id: "ep_new", name: "My Endpoint" } };
+      mockFetch.mockResolvedValueOnce(jsonResponse(newEp));
+
+      await client.createEndpoint("My Endpoint");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://catchhook.localhost:3100/api/v1/endpoints",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ endpoint: { name: "My Endpoint" } }),
+        })
+      );
+    });
+  });
+
+  describe("getTunnelTicket", () => {
+    it("sends POST with endpoint_id", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse({ ticket: "tkt_abc", expires_in: 30 }));
+
+      const result = await client.getTunnelTicket("ep_123");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://catchhook.localhost:3100/api/v1/tunnel/connect",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ endpoint_id: "ep_123" }),
+        })
+      );
+      expect(result.ticket).toBe("tkt_abc");
+    });
+  });
+
+  describe("reportDelivery", () => {
+    it("sends POST with delivery data", async () => {
+      mockFetch.mockResolvedValueOnce(jsonResponse(null, 204));
+
+      await client.reportDelivery({
+        webhook_request_id: "wr_1",
+        endpoint_id: "ep_1",
+        status_code: 200,
+        response_time_ms: 42,
+        target_url: "http://localhost:3000",
+      });
+
+      const [, fetchOpts] = mockFetch.mock.calls[0];
+      const body = JSON.parse(fetchOpts.body);
+      expect(body.webhook_request_id).toBe("wr_1");
+      expect(body.status_code).toBe(200);
+    });
+  });
+
+  describe("error handling", () => {
+    it("includes response body text in error message", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        text: () => Promise.resolve('{"error": "Plan limit reached"}'),
+      });
+
+      await expect(client.listEndpoints()).rejects.toThrow("API error 403");
+    });
+
+    it("handles empty response body gracefully", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        text: () => Promise.resolve(""),
+      });
+
+      await expect(client.verify()).rejects.toThrow("API error 500: Internal Server Error");
+    });
+  });
+});
+
+describe("getAnonymousTunnelTicket", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("sends POST to connect_anonymous with tunnel_key", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ticket: "anon_tkt", expires_in: 30, endpoint_id: "ep_tmp" }));
+
+    const result = await getAnonymousTunnelTicket("my_tunnel_key", "catchhook.localhost:3100");
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://catchhook.localhost:3100/api/v1/tunnel/connect_anonymous",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ tunnel_key: "my_tunnel_key" }),
+      })
+    );
+    expect(result.ticket).toBe("anon_tkt");
+  });
+
+  it("throws specific message for 401 (expired key)", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      text: () => Promise.resolve(""),
+    });
+
+    await expect(getAnonymousTunnelTicket("bad_key")).rejects.toThrow(
+      "Invalid or expired tunnel key"
+    );
+  });
+
+  it("throws generic error for other status codes", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      text: () => Promise.resolve(""),
+    });
+
+    await expect(getAnonymousTunnelTicket("key")).rejects.toThrow("API error 500");
+  });
+});
+
+describe("reportAnonymousDelivery", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("sends POST to delivery_reports_anonymous with tunnel_key and delivery data", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({}, 200));
+
+    await reportAnonymousDelivery(
+      {
+        tunnel_key: "tkey_abc",
+        webhook_request_id: "req_123",
+        endpoint_id: "ep_tmp",
+        status_code: 200,
+        response_time_ms: 35,
+        target_url: "http://localhost:3000",
+      },
+      "catchhook.localhost:3100"
+    );
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://catchhook.localhost:3100/api/v1/tunnel/delivery_reports_anonymous",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          tunnel_key: "tkey_abc",
+          webhook_request_id: "req_123",
+          endpoint_id: "ep_tmp",
+          status_code: 200,
+          response_time_ms: 35,
+          target_url: "http://localhost:3000",
+        }),
+      })
+    );
+  });
+
+  it("throws on non-ok response", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      text: () => Promise.resolve("Unauthorized"),
+    });
+
+    await expect(
+      reportAnonymousDelivery({
+        tunnel_key: "bad",
+        webhook_request_id: "req_1",
+        endpoint_id: "ep_1",
+        status_code: 500,
+        response_time_ms: 10,
+        target_url: "http://localhost:3000",
+      })
+    ).rejects.toThrow("API error 401");
+  });
+});

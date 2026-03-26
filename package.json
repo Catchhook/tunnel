@@ -1,0 +1,58 @@
+{
+  "name": "@catchhook/tunnel",
+  "version": "0.3.0",
+  "description": "CatchHook CLI — tunnel webhooks to localhost with a live dashboard",
+  "type": "module",
+  "bin": {
+    "catchhook-tunnel": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "yarn build"
+  },
+  "keywords": [
+    "webhooks",
+    "tunnel",
+    "ngrok",
+    "localhost",
+    "catchhook",
+    "debugging"
+  ],
+  "author": "CatchHook",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/catchhook/tunnel.git"
+  },
+  "homepage": "https://catchhook.app",
+  "bugs": {
+    "url": "https://github.com/catchhook/tunnel/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@rails/actioncable": "^7.2.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "conf": "^13.0.1",
+    "open": "^10.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.18"
+  }
+}
