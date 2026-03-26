@@ -23,11 +23,7 @@ program
   .name("catchhook-tunnel")
   .description("Tunnel webhooks from CatchHook to your localhost")
   .version(VERSION)
-  // Prevent the root program from consuming options meant for subcommands.
-  // Without this, `-p`/`--port` defined on both the root and `start` causes
-  // the root parser to eat the value before the subcommand sees it.
-  .enablePositionalOptions()
-  .passThroughOptions();
+  .enablePositionalOptions();
 
 program
   .command("login")
@@ -78,12 +74,15 @@ program
   .option("-p, --port <port>", "Local port to forward to (default: 3000)")
   .option("--host <host>", "CatchHook server host")
   .action(async (endpointId, options) => {
-    // Only handle if it looks like an endpoint ID and --key is provided
     if (endpointId && options.key) {
       ui.banner(VERSION);
       await startCommand(endpointId, { ...options, key: options.key });
+    } else if (endpointId) {
+      ui.error(`Missing --key flag. Usage: catchhook-tunnel ${endpointId} --key <tunnel_key> [--port 3000]`);
+      process.exit(1);
+    } else {
+      program.help();
     }
-    // Otherwise, let commander handle it (show help, etc.)
   });
 
 program.parse();
