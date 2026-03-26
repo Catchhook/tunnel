@@ -1,4 +1,4 @@
-import { createConsumer, type Consumer, type Subscription } from "@rails/actioncable";
+import { createConsumer, adapters, type Consumer, type Subscription } from "@rails/actioncable";
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { getHost, getProtocol, getWsProtocol } from "./constants.js";
@@ -13,12 +13,10 @@ function debug(...args: any[]): void {
   }
 }
 
-// Polyfill browser globals that ActionCable expects in Node.js
-//
-// ActionCable calls `new WebSocket(url, protocols)` internally. The `ws` library
-// accepts an optional third `options` argument. We wrap it to inject an Origin
-// header matching the CatchHook host so ActionCable's origin checking accepts
-// CLI connections in both development and production.
+// ActionCable captures `WebSocket` at import time via its `adapters` module.
+// In Node.js, `WebSocket` isn't a global, so `adapters.WebSocket` ends up as
+// `undefined` unless we patch it AFTER the import. We wrap the `ws` library
+// to inject an Origin header matching the CatchHook host.
 function createOriginWebSocket(host: string) {
   const origin = `${getProtocol(host)}://${host}`;
   return class OriginWebSocket extends WebSocket {
@@ -28,8 +26,17 @@ function createOriginWebSocket(host: string) {
   } as unknown as typeof globalThis.WebSocket;
 }
 
-// Default polyfill — callers can override via setWebSocketHost() before connecting
-(globalThis as any).WebSocket = createOriginWebSocket(getHost());
+// Patch ActionCable's adapter directly — this is what it actually uses
+// to create WebSocket connections. Setting globalThis.WebSocket alone is
+// insufficient because adapters.WebSocket was already captured as `undefined`
+// during the @rails/actioncable module evaluation.
+function setWebSocketClass(host: string): void {
+  const WsClass = createOriginWebSocket(host);
+  (adapters as any).WebSocket = WsClass;
+  (globalThis as any).WebSocket = WsClass;
+}
+
+setWebSocketClass(getHost());
 
 // ConnectionMonitor calls addEventListener("visibilitychange", ...) and
 // checks document.visibilityState — stub these as no-ops for Node.js
@@ -148,7 +155,7 @@ export async function connectMultiTunnel(
   const host = auth.host || getHost();
   const wsProtocol = getWsProtocol(host);
 
-  (globalThis as any).WebSocket = createOriginWebSocket(host);
+  setWebSocketClass(host);
 
   const clientId = randomUUID();
   debug("clientId:", clientId);

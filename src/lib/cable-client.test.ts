@@ -24,6 +24,7 @@ const mockConsumer = {
 
 vi.mock("@rails/actioncable", () => ({
   createConsumer: vi.fn(() => mockConsumer),
+  adapters: { WebSocket: undefined },
 }));
 
 // Mock api-client for ticket fetching
