@@ -209,7 +209,7 @@ async function runSingleTunnel(
 
       reportDelivery(client, auth, data, endpoint.id, targetUrl, result);
     },
-  });
+  }, targetUrl);
 
   setupShutdown(connection.disconnect);
   await new Promise(() => {});
@@ -242,7 +242,7 @@ async function runMultiTunnel(
     onRejected() {
       ui.error("Tunnel subscription rejected by server. Check your endpoint IDs and account limits.");
     },
-  }, endpoints[0].id);
+  }, endpoints[0].id, targetUrl);
 
   for (const endpoint of endpoints) {
     connection.addEndpoint(endpoint.id, {

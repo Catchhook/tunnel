@@ -231,7 +231,8 @@ describe("startCommand", () => {
         tunnelKey: "tkey_abc",
         endpointId: "ep_abc",
       }),
-      expect.any(Object)
+      expect.any(Object),
+      "http://localhost:4000"
     );
   });
 

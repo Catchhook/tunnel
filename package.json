@@ -1,6 +1,6 @@
 {
   "name": "@catchhook/tunnel",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "CatchHook CLI — tunnel webhooks to localhost with a live dashboard",
   "type": "module",
   "bin": {

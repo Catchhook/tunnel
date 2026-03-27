@@ -150,7 +150,8 @@ export async function connectMultiTunnel(
     onReconnecting: () => void;
     onRejected?: () => void;
   },
-  initialEndpointId?: string
+  initialEndpointId?: string,
+  targetUrl?: string
 ): Promise<MultiTunnelConnection> {
   const host = auth.host || getHost();
   const wsProtocol = getWsProtocol(host);
@@ -196,7 +197,7 @@ export async function connectMultiTunnel(
     let monitorKilled = false;
 
     const channel = consumer.subscriptions.create(
-      { channel: "TunnelChannel", endpoint_id: endpointId, client_id: clientId },
+      { channel: "TunnelChannel", endpoint_id: endpointId, client_id: clientId, target_url: targetUrl },
       {
         connected() {
           debug(`connected() fired for endpoint ${endpointId}, gen=${generation}`);
@@ -380,7 +381,8 @@ export async function connectTunnel(
     onWebhook: (data: WebhookData) => void;
     onReconnecting: () => void;
     onRejected?: () => void;
-  }
+  },
+  targetUrl?: string
 ): Promise<TunnelConnection> {
   const multiAuth: MultiAuthMode = auth.mode === "authenticated"
     ? { mode: "authenticated", token: auth.token, host: auth.host }
@@ -391,7 +393,7 @@ export async function connectTunnel(
     onDisconnected: callbacks.onDisconnected,
     onReconnecting: callbacks.onReconnecting,
     onRejected: callbacks.onRejected,
-  }, auth.endpointId);
+  }, auth.endpointId, targetUrl);
 
   const sub = multi.addEndpoint(auth.endpointId, {
     onWebhook: callbacks.onWebhook,
