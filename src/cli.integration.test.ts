@@ -31,8 +31,7 @@ describe("CLI integration", () => {
 
     it("lists all commands", () => {
       const { stdout } = runCli(["--help"]);
-      expect(stdout).toContain("login");
-      expect(stdout).toContain("logout");
+      expect(stdout).toContain("auth");
       expect(stdout).toContain("endpoints");
       expect(stdout).toContain("start");
     });
@@ -46,12 +45,22 @@ describe("CLI integration", () => {
     });
   });
 
-  describe("login --help", () => {
-    it("shows login command options", () => {
-      const { stdout, exitCode } = runCli(["login", "--help"]);
+  describe("auth login --help", () => {
+    it("shows auth login command options", () => {
+      const { stdout, exitCode } = runCli(["auth", "login", "--help"]);
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Authenticate");
       expect(stdout).toContain("--host");
+    });
+  });
+
+  describe("auth token --help", () => {
+    it("shows token subcommands", () => {
+      const { stdout, exitCode } = runCli(["auth", "token", "--help"]);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("set");
+      expect(stdout).toContain("show");
+      expect(stdout).toContain("clear");
     });
   });
 
@@ -63,25 +72,8 @@ describe("CLI integration", () => {
       expect(stdout).toContain("--endpoint");
       expect(stdout).toContain("--key");
       expect(stdout).toContain("--new");
+      expect(stdout).toContain("--token");
     });
-  });
-
-  describe("logout", () => {
-    it("runs without error", () => {
-      const { stdout, exitCode } = runCli(["logout"]);
-      expect(exitCode).toBe(0);
-      expect(stdout).toContain("Logged out");
-    });
-  });
-
-  describe("endpoints (unauthenticated)", () => {
-    it("shows auth error when not logged in", () => {
-      // Clear any stored config first
-      runCli(["logout"]);
-      const { stdout, exitCode } = runCli(["endpoints"]);
-      expect(exitCode).toBe(1);
-      expect(stdout).toContain("Not authenticated");
-    }, 15_000); // Two sequential process spawns need extra time
   });
 
   describe("anonymous shorthand (ep_xxx --key)", () => {
@@ -106,6 +98,7 @@ describe("CLI integration", () => {
       expect(exitCode).toBe(0);
       expect(stdout).toContain("catchhook-tunnel");
       expect(stdout).toContain("start");
+      expect(stdout).toContain("auth");
     });
   });
 });

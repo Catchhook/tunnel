@@ -4,8 +4,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { program } from "commander";
-import { loginCommand } from "./commands/login.js";
-import { logoutCommand } from "./commands/logout.js";
+import {
+  authLoginCommand,
+  authTokenClearCommand,
+  authTokenSetCommand,
+  authTokenShowCommand,
+  authWhoamiCommand,
+} from "./commands/auth.js";
 import { endpointsCommand } from "./commands/endpoints.js";
 import { startCommand } from "./commands/start.js";
 import * as ui from "./lib/ui.js";
@@ -31,26 +36,63 @@ program
   .version(VERSION)
   .enablePositionalOptions();
 
-program
+const auth = program
+  .command("auth")
+  .description("Authentication and token management commands");
+
+auth
   .command("login")
-  .description("Authenticate with your CatchHook account via browser")
+  .description("Authenticate with your CatchHook account")
   .option("--host <host>", "CatchHook server host (default: catchhook.app)")
+  .option("--auth-code <code>", "One-time auth code from /auth/cli")
+  .option("--no-browser", "Don't try to open a browser automatically")
   .action(async (options) => {
     ui.banner(VERSION);
-    await loginCommand(options);
+    const { browser, ...rest } = options;
+    await authLoginCommand({ ...rest, noBrowser: browser === false });
   });
 
-program
-  .command("logout")
-  .description("Clear stored authentication credentials")
-  .action(async () => {
-    await logoutCommand();
+auth
+  .command("whoami")
+  .description("Verify current authentication and print account identity")
+  .option("--host <host>", "CatchHook server host")
+  .option("--token <token>", "API token (also saved locally)")
+  .action(async (options) => {
+    ui.banner(VERSION);
+    await authWhoamiCommand(options);
+  });
+
+const authToken = auth
+  .command("token")
+  .description("Manage stored API tokens");
+
+authToken
+  .command("set <token>")
+  .description("Store an API token locally")
+  .option("--host <host>", "Persist host alongside token")
+  .action((token, options) => {
+    authTokenSetCommand(token, options);
+  });
+
+authToken
+  .command("show")
+  .description("Show masked stored token")
+  .action(() => {
+    authTokenShowCommand();
+  });
+
+authToken
+  .command("clear")
+  .description("Clear stored token")
+  .action(() => {
+    authTokenClearCommand();
   });
 
 program
   .command("endpoints")
   .description("List your endpoints")
   .option("--host <host>", "CatchHook server host")
+  .option("--token <token>", "API token (also saved locally)")
   .action(async (options) => {
     ui.banner(VERSION);
     await endpointsCommand(options);
@@ -65,6 +107,9 @@ program
   .option("-k, --key <tunnel_key>", "Tunnel key for anonymous mode (skip login)")
   .option("--new", "Create a new endpoint for this tunnel")
   .option("--host <host>", "CatchHook server host")
+  .option("--token <token>", "API token (also saved locally)")
+  .option("--auth-code <code>", "One-time auth code from /auth/cli")
+  .option("--no-browser", "Don't try to open browser for auto-auth")
   .action(async (target, options) => {
     ui.banner(VERSION);
     await startCommand(target, options);

@@ -113,6 +113,7 @@ export interface RequestLogMeta {
   contentType?: string | null;
   bodySize?: number;
   ipAddress?: string | null;
+  replay?: boolean;
 }
 
 function shortContentType(ct: string | null | undefined): string | null {
@@ -163,7 +164,11 @@ export function requestLog(
     parts.push(` ${chalk.cyan(`[${meta.endpointName}]`)}`);
   }
 
-  parts.push(`  ${methodStr}  ${pathStr}`);
+  if (meta?.replay) {
+    parts.push(`  ${chalk.dim("↺")} ${methodStr}  ${pathStr}`);
+  } else {
+    parts.push(`  ${methodStr}  ${pathStr}`);
+  }
 
   const details: string[] = [];
   const ct = shortContentType(meta?.contentType);

@@ -3,59 +3,81 @@ import crypto from "node:crypto";
 import open from "open";
 import { getBaseUrl, getHost } from "../lib/constants.js";
 import { setStoredToken, setStoredHost } from "../lib/config.js";
-import { ApiClient } from "../lib/api-client.js";
+import { exchangeCliAuthCode, type AuthIdentity } from "../lib/api-client.js";
 import * as ui from "../lib/ui.js";
 
-export async function loginCommand(options: { host?: string }): Promise<void> {
+export interface LoginOptions {
+  host?: string;
+  authCode?: string;
+  noBrowser?: boolean;
+  timeoutMs?: number;
+}
+
+export interface LoginResult {
+  token: string;
+  host: string;
+  identity: AuthIdentity;
+}
+
+export async function loginCommand(options: LoginOptions): Promise<LoginResult> {
   const host = options.host || getHost();
+
+  if (options.authCode) {
+    ui.info(`Completing authentication with one-time code on ${host}...`);
+    return completeCodeExchange(options.authCode, host);
+  }
+
   const baseUrl = getBaseUrl(host);
   const state = crypto.randomBytes(16).toString("hex");
+  const timeoutMs = options.timeoutMs ?? 60_000;
 
   ui.info(`Authenticating with ${host}...`);
 
-  // Start a temporary localhost server to receive the callback
-  const { port, tokenPromise, server } = await startCallbackServer(state);
-
+  // Start a temporary localhost server to receive the callback code
+  const { port, authCodePromise, server } = await startCallbackServer(state, timeoutMs);
   const authUrl = `${baseUrl}/auth/cli?callback_port=${port}&state=${state}`;
 
   try {
-    await open(authUrl);
-    ui.info("Opening browser for authentication...");
-  } catch {
-    // Browser failed to open -- fallback to manual flow
-    ui.warn("Could not open browser automatically.");
-    console.log();
-    console.log(`  Open this URL in your browser:`);
-    console.log(`  ${authUrl}`);
-    console.log();
-  }
-
-  ui.info("Waiting for authorization (30s timeout)...");
-
-  try {
-    const token = await tokenPromise;
-
-    // Store the token and host
-    setStoredToken(token);
-    if (host !== "catchhook.app") {
-      setStoredHost(host);
+    if (options.noBrowser) {
+      console.log();
+      console.log("  Open this URL in your browser to authorize:");
+      console.log(`  ${authUrl}`);
+      console.log();
+    } else {
+      try {
+        await open(authUrl);
+        ui.info("Opening browser for authentication...");
+      } catch {
+        ui.warn("Could not open browser automatically.");
+        console.log();
+        console.log("  Open this URL in your browser:");
+        console.log(`  ${authUrl}`);
+        console.log();
+      }
     }
 
-    // Verify the token works
-    const client = new ApiClient(token, host);
-    const verify = await client.verify();
-
-    ui.success(
-      `Authenticated as ${verify.data.user.email} (${verify.data.account.name})`
-    );
-    ui.info("You can now use `catchhook-tunnel start` to begin tunneling.");
-  } catch (err: any) {
-    ui.error(err.message || "Authentication failed");
-    process.exit(1);
+    ui.info(`Waiting for authorization (${Math.floor(timeoutMs / 1000)}s timeout)...`);
+    const authCode = await authCodePromise;
+    return await completeCodeExchange(authCode, host);
   } finally {
     server.close();
-    process.exit(0);
   }
+}
+
+async function completeCodeExchange(authCode: string, host: string): Promise<LoginResult> {
+  const exchange = await exchangeCliAuthCode(authCode, host);
+  const token = exchange.data.token;
+  const identity: AuthIdentity = {
+    user: exchange.data.user,
+    account: exchange.data.account,
+  };
+
+  setStoredToken(token);
+  setStoredHost(host);
+
+  ui.success(`Authenticated as ${identity.user.email} (${identity.account.name})`);
+
+  return { token, host, identity };
 }
 
 const PAGE_STYLE = `
@@ -96,42 +118,53 @@ function errorPage(title: string, message: string): string {
 }
 
 function startCallbackServer(
-  expectedState: string
-): Promise<{ port: number; tokenPromise: Promise<string>; server: http.Server }> {
+  expectedState: string,
+  timeoutMs: number
+): Promise<{ port: number; authCodePromise: Promise<string>; server: http.Server }> {
   return new Promise((resolve) => {
-    let resolveToken: (token: string) => void;
-    let rejectToken: (err: Error) => void;
+    let resolveCode: (code: string) => void;
+    let rejectCode: (err: Error) => void;
+    let settled = false;
 
-    const tokenPromise = new Promise<string>((res, rej) => {
-      resolveToken = res;
-      rejectToken = rej;
+    const authCodePromise = new Promise<string>((res, rej) => {
+      resolveCode = (code: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        res(code);
+      };
+      rejectCode = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        rej(err);
+      };
     });
 
     const server = http.createServer((req, res) => {
-      const url = new URL(req.url!, `http://localhost`);
+      const url = new URL(req.url!, "http://localhost");
 
       if (url.pathname === "/callback") {
-        const token = url.searchParams.get("token");
+        const authCode = url.searchParams.get("code");
         const state = url.searchParams.get("state");
 
         if (state !== expectedState) {
           res.writeHead(400, { "Content-Type": "text/html" });
           res.end(errorPage("Authentication Failed", "Invalid state parameter. Please try again."));
-          rejectToken(new Error("State mismatch — possible CSRF attack"));
+          rejectCode(new Error("State mismatch - possible CSRF attack"));
           return;
         }
 
-        if (!token) {
+        if (!authCode) {
           res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(errorPage("Authentication Failed", "No token was received. Please try again."));
-          rejectToken(new Error("No token in callback"));
+          res.end(errorPage("Authentication Failed", "No auth code was received. Please try again."));
+          rejectCode(new Error("No auth code in callback"));
           return;
         }
 
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(successPage(), () => {
-          // Resolve only after the response is fully flushed to the browser
-          resolveToken(token);
+          resolveCode(authCode);
         });
       } else {
         res.writeHead(404);
@@ -139,18 +172,15 @@ function startCallbackServer(
       }
     });
 
-    // Listen on random port
+    const timeout = setTimeout(() => {
+      rejectCode(new Error("Authentication timed out. Please try again."));
+      server.close();
+    }, timeoutMs);
+
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
-
-      // 30s timeout
-      setTimeout(() => {
-        rejectToken(new Error("Authentication timed out. Please try again."));
-        server.close();
-      }, 30_000);
-
-      resolve({ port, tokenPromise, server });
+      resolve({ port, authCodePromise, server });
     });
   });
 }

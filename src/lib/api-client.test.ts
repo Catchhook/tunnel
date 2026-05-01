@@ -276,3 +276,177 @@ describe("reportAnonymousDelivery", () => {
     ).rejects.toThrow("API error 401");
   });
 });
+
+describe("ApiClient.getMissedRequests", () => {
+  it("fetches missed requests with correct params", async () => {
+    const rawData = [{
+      type: "webhook_request",
+      id: "wr_123",
+      endpoint_id: "ep_1",
+      method: "POST",
+      path: "/hook",
+      headers: { "content-type": "application/json" },
+      body: Buffer.from("{}").toString("base64"),
+      body_encoding: "base64",
+      body_size: 2,
+      query_parameters: {},
+      content_type: "application/json",
+      ip_address: "1.2.3.4",
+      requested_at: "2026-03-30T12:00:00Z",
+    }];
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: rawData }),
+    });
+
+    const client = new ApiClient("chk_test", "catchhook.app");
+    const result = await client.getMissedRequests(["ep_1", "ep_2"], "2026-03-30T11:00:00Z");
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("wr_123");
+    expect(result[0].body).toBeInstanceOf(Buffer);
+    expect(result[0].body?.toString()).toBe("{}");
+
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/tunnel/missed?");
+    expect(url).toContain("since=2026-03-30T11%3A00%3A00Z");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_1");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_2");
+  });
+
+  it("decodes null body correctly", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: [{
+        type: "webhook_request",
+        id: "wr_null",
+        endpoint_id: "ep_1",
+        method: "GET",
+        path: "/",
+        headers: {},
+        body: null,
+        body_encoding: "base64",
+        body_size: 0,
+        query_parameters: {},
+        content_type: null,
+        ip_address: null,
+        requested_at: "2026-03-30T12:00:00Z",
+      }]}),
+    });
+
+    const client = new ApiClient("chk_test");
+    const result = await client.getMissedRequests(["ep_1"], "2026-03-30T11:00:00Z");
+
+    expect(result[0].body).toBeNull();
+  });
+});
+
+describe("getAnonymousMissedRequests", () => {
+  it("fetches anonymous missed requests", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: [{
+        type: "webhook_request",
+        id: "wr_anon",
+        endpoint_id: "ep_tmp",
+        method: "POST",
+        path: "/hook",
+        headers: {},
+        body: Buffer.from("hello").toString("base64"),
+        body_encoding: "base64",
+        body_size: 5,
+        query_parameters: {},
+        content_type: "text/plain",
+        ip_address: "5.6.7.8",
+        requested_at: "2026-03-30T12:00:00Z",
+      }]}),
+    });
+
+    const { getAnonymousMissedRequests } = await import("./api-client.js");
+    const result = await getAnonymousMissedRequests("tkey_abc", "2026-03-30T11:00:00Z", "catchhook.app");
+
+    expect(result).toHaveLength(1);
+    expect(result[0].body?.toString()).toBe("hello");
+
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/tunnel/missed_anonymous?");
+    expect(url).toContain("tunnel_key=tkey_abc");
+  });
+
+  it("throws on 401", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+    });
+
+    const { getAnonymousMissedRequests } = await import("./api-client.js");
+    await expect(
+      getAnonymousMissedRequests("tkey_bad", "2026-03-30T11:00:00Z")
+    ).rejects.toThrow("Invalid or expired tunnel key");
+  });
+});
+
+describe("ApiClient.getUndeliveredRequests", () => {
+  it("fetches undelivered requests with correct params", async () => {
+    const rawData = [{
+      type: "webhook_request",
+      id: "wr_undelivered",
+      endpoint_id: "ep_1",
+      method: "POST",
+      path: "/hook",
+      headers: { "content-type": "application/json" },
+      body: Buffer.from("{}").toString("base64"),
+      body_encoding: "base64",
+      body_size: 2,
+      query_parameters: {},
+      content_type: "application/json",
+      ip_address: "1.2.3.4",
+      requested_at: "2026-03-30T12:00:00Z",
+    }];
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: rawData }),
+    });
+
+    const client = new ApiClient("chk_test", "catchhook.app");
+    const result = await client.getUndeliveredRequests(["ep_1", "ep_2"]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe("wr_undelivered");
+    expect(result[0].body).toBeInstanceOf(Buffer);
+
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/tunnel/undelivered?");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_1");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_2");
+    expect(url).not.toContain("minutes=");
+  });
+
+  it("passes minutes parameter when provided", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    const client = new ApiClient("chk_test", "catchhook.app");
+    await client.getUndeliveredRequests(["ep_1"], 60);
+
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("minutes=60");
+  });
+
+  it("returns empty array when no undelivered requests", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    });
+
+    const client = new ApiClient("chk_test");
+    const result = await client.getUndeliveredRequests(["ep_1"]);
+
+    expect(result).toEqual([]);
+  });
+});

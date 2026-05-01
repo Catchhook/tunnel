@@ -281,7 +281,7 @@ export async function connectMultiTunnel(
       const msg = ticketErr?.message || "";
       if (msg.includes("401") || msg.includes("unauthorized") || msg.includes("Unauthorized")) {
         const hint = auth.mode === "authenticated"
-          ? "API token may be expired or revoked. Run `catchhook-tunnel login` to re-authenticate."
+          ? "API token may be expired or revoked. Run `catchhook-tunnel auth login` to re-authenticate."
           : "Tunnel key is invalid or the endpoint has expired.";
         throw new Error(hint);
       }
