@@ -26,6 +26,8 @@ function makeWebhookData(overrides: Partial<WebhookData> = {}): WebhookData {
     content_type: "application/json",
     ip_address: "203.0.113.50",
     requested_at: new Date().toISOString(),
+    detected_provider: null,
+    provider_event_data: null,
     ...overrides,
   };
 }
@@ -241,6 +243,7 @@ describe("forwardToLocalhost", () => {
     expect(result.statusCode).toBe(0);
     expect(result.statusText).toBe("Connection Refused");
     expect(result.error).toContain("Cannot connect");
+    expect(result.failureCategory).toBe("connection_refused");
   });
 
   it("handles AbortError (timeout)", async () => {
@@ -256,6 +259,7 @@ describe("forwardToLocalhost", () => {
     expect(result.statusCode).toBe(0);
     expect(result.statusText).toBe("Timeout");
     expect(result.error).toContain("timed out");
+    expect(result.failureCategory).toBe("timeout");
   });
 
   it("handles generic errors", async () => {
@@ -269,9 +273,10 @@ describe("forwardToLocalhost", () => {
     expect(result.statusCode).toBe(0);
     expect(result.statusText).toBe("Error");
     expect(result.error).toBe("DNS resolution failed");
+    expect(result.failureCategory).toBe("dns_error");
   });
 
-  it("forwards 4xx responses without error", async () => {
+  it("forwards 4xx responses with http_error category", async () => {
     mockFetch.mockResolvedValueOnce(mockResponse(422, "Unprocessable Entity"));
 
     const result = await forwardToLocalhost(
@@ -282,9 +287,10 @@ describe("forwardToLocalhost", () => {
     expect(result.statusCode).toBe(422);
     expect(result.statusText).toBe("Unprocessable Entity");
     expect(result.error).toBeUndefined();
+    expect(result.failureCategory).toBe("http_error");
   });
 
-  it("forwards 5xx responses without error", async () => {
+  it("forwards 5xx responses with http_error category", async () => {
     mockFetch.mockResolvedValueOnce(mockResponse(500, "Internal Server Error"));
 
     const result = await forwardToLocalhost(
@@ -294,5 +300,30 @@ describe("forwardToLocalhost", () => {
 
     expect(result.statusCode).toBe(500);
     expect(result.error).toBeUndefined();
+    expect(result.failureCategory).toBe("http_error");
+  });
+
+  it("returns no failureCategory for successful responses", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse(200, "OK"));
+
+    const result = await forwardToLocalhost(
+      makeWebhookData(),
+      "http://localhost:3000"
+    );
+
+    expect(result.statusCode).toBe(200);
+    expect(result.failureCategory).toBeUndefined();
+  });
+
+  it("classifies TLS errors", async () => {
+    const tlsError = new Error("TLS handshake failed");
+    mockFetch.mockRejectedValueOnce(tlsError);
+
+    const result = await forwardToLocalhost(
+      makeWebhookData(),
+      "https://localhost:3000"
+    );
+
+    expect(result.failureCategory).toBe("tls_error");
   });
 });

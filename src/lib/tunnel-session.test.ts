@@ -33,6 +33,8 @@ function stubWebhook(overrides: Partial<WebhookData> = {}): WebhookData {
     content_type: "application/json",
     ip_address: "127.0.0.1",
     requested_at: new Date().toISOString(),
+    detected_provider: null,
+    provider_event_data: null,
     ...overrides,
   };
 }
@@ -89,6 +91,8 @@ describe("runCatchUp", () => {
     id: "ep_123",
     name: "Test Endpoint",
     custom_id: null,
+    provider: null,
+    provider_config: null,
     webhook_url: "https://listen.catchhook.app/hooks/ep_123",
     tunnel_active: false,
     created_at: "",

@@ -61,6 +61,8 @@ export interface WebhookData {
   content_type: string | null;
   ip_address: string | null;
   requested_at: string;
+  detected_provider: string | null;
+  provider_event_data: Record<string, any> | null;
 }
 
 export type AuthMode =

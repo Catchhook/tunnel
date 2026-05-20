@@ -15,11 +15,20 @@ const HOP_BY_HOP_HEADERS = new Set([
   "trailers",
 ]);
 
+export type FailureCategory =
+  | "connection_refused"
+  | "timeout"
+  | "dns_error"
+  | "tls_error"
+  | "http_error"
+  | "unknown_error";
+
 export interface ForwardResult {
   statusCode: number;
   statusText: string;
   responseTimeMs: number;
   error?: string;
+  failureCategory?: FailureCategory;
 }
 
 // HTTP methods that MUST NOT have a request body (Node fetch throws otherwise)
@@ -91,27 +100,56 @@ export async function forwardToLocalhost(
 
     const elapsed = Math.round(performance.now() - start);
 
-    return {
+    const result: ForwardResult = {
       statusCode: response.status,
       statusText: response.statusText,
       responseTimeMs: elapsed,
     };
+
+    if (response.status < 200 || response.status >= 300) {
+      result.failureCategory = "http_error";
+    }
+
+    return result;
   } catch (err: any) {
     const elapsed = Math.round(performance.now() - start);
 
     if (err.name === "AbortError" || err.code === "ABORT_ERR") {
-      return { statusCode: 0, statusText: "Timeout", responseTimeMs: elapsed, error: "Request timed out (30s)" };
+      return { statusCode: 0, statusText: "Timeout", responseTimeMs: elapsed, error: "Request timed out (30s)", failureCategory: "timeout" as const };
     }
 
     if (err.cause?.code === "ECONNREFUSED") {
-      return { statusCode: 0, statusText: "Connection Refused", responseTimeMs: elapsed, error: `Cannot connect to ${targetUrl}` };
+      return { statusCode: 0, statusText: "Connection Refused", responseTimeMs: elapsed, error: `Cannot connect to ${targetUrl}`, failureCategory: "connection_refused" as const };
     }
+
+    const message = err.message || "Unknown error";
+    const category = classifyError(err);
 
     return {
       statusCode: 0,
       statusText: "Error",
       responseTimeMs: elapsed,
-      error: err.message || "Unknown error",
+      error: message,
+      failureCategory: category,
     };
   }
+}
+
+function classifyError(err: any): FailureCategory {
+  const code = err.cause?.code || err.code || "";
+  const msg = (err.message || "").toLowerCase();
+
+  if (code === "ENOTFOUND" || msg.includes("getaddrinfo") || msg.includes("dns")) {
+    return "dns_error";
+  }
+  if (code === "ERR_TLS" || msg.includes("tls") || msg.includes("ssl") || msg.includes("certificate")) {
+    return "tls_error";
+  }
+  if (code === "ECONNREFUSED" || msg.includes("econnrefused")) {
+    return "connection_refused";
+  }
+  if (msg.includes("timeout") || msg.includes("abort")) {
+    return "timeout";
+  }
+  return "unknown_error";
 }

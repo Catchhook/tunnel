@@ -1,6 +1,7 @@
 import { ApiClient, reportAnonymousDelivery, type EndpointData, type MissedWebhookData } from "./api-client.js";
 import { connectTunnel, connectMultiTunnel, type AuthMode, type MultiAuthMode, type WebhookData } from "./cable-client.js";
 import { forwardToLocalhost, type ForwardResult } from "./forwarder.js";
+import { getReplayWarning } from "./providers.js";
 import * as ui from "./ui.js";
 
 export type CatchUpFetcher = (endpointIds: string[]) => Promise<MissedWebhookData[]>;
@@ -44,6 +45,8 @@ export async function runSingleTunnel(
         contentType: data.content_type,
         bodySize: data.body_size,
         ipAddress: data.ip_address,
+        detectedProvider: data.detected_provider,
+        providerEventType: data.provider_event_data?.event_type,
       });
 
       reportDelivery(client, auth, data, endpoint.id, targetUrl, result);
@@ -100,6 +103,8 @@ export async function runMultiTunnel(
           contentType: data.content_type,
           bodySize: data.body_size,
           ipAddress: data.ip_address,
+          detectedProvider: data.detected_provider,
+          providerEventType: data.provider_event_data?.event_type,
         });
 
         const auth: AuthMode = { mode: "authenticated", token, endpointId: endpoint.id, host };
@@ -158,6 +163,15 @@ export async function runCatchUp(
       if (tracker.forwardedIds.has(data.id)) continue;
       tracker.track(data);
       const endpoint = endpoints.find((ep) => ep.id === data.endpoint_id) || endpoints[0];
+
+      const warning = getReplayWarning(
+        data.detected_provider,
+        data.provider_event_data?.event_type
+      );
+      if (warning) {
+        ui.warn(`Replay warning (${data.id}): ${warning}`);
+      }
+
       const result: ForwardResult = await forwardToLocalhost(data, targetUrl);
       ui.requestLog(data.method, data.path, result, {
         endpointName: endpoint.name,
@@ -165,6 +179,8 @@ export async function runCatchUp(
         bodySize: data.body_size,
         ipAddress: data.ip_address,
         replay: true,
+        detectedProvider: data.detected_provider,
+        providerEventType: data.provider_event_data?.event_type,
       });
 
       if ("endpointId" in auth) {
@@ -196,6 +212,7 @@ function reportDelivery(
       response_time_ms: result.responseTimeMs,
       target_url: targetUrl,
       response_message: result.error || result.statusText || undefined,
+      failure_category: result.failureCategory || undefined,
     }).catch(() => {});
   } else if (auth.mode === "anonymous") {
     reportAnonymousDelivery(
@@ -207,6 +224,7 @@ function reportDelivery(
         response_time_ms: result.responseTimeMs,
         target_url: targetUrl,
         response_message: result.error || result.statusText || undefined,
+        failure_category: result.failureCategory || undefined,
       },
       auth.host
     ).catch(() => {});

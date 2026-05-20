@@ -106,6 +106,7 @@ program
   .option("--all", "Tunnel all endpoints in the account")
   .option("-k, --key <tunnel_key>", "Tunnel key for anonymous mode (skip login)")
   .option("--new", "Create a new endpoint for this tunnel")
+  .option("--provider <name>", "Provider preset (github, stripe)", undefined)
   .option("--host <host>", "CatchHook server host")
   .option("--token <token>", "API token (also saved locally)")
   .option("--auth-code <code>", "One-time auth code from /auth/cli")

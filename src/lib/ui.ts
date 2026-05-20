@@ -1,3 +1,4 @@
+import { createInterface } from "node:readline";
 import chalk from "chalk";
 import type { ForwardResult } from "./forwarder.js";
 
@@ -114,6 +115,8 @@ export interface RequestLogMeta {
   bodySize?: number;
   ipAddress?: string | null;
   replay?: boolean;
+  detectedProvider?: string | null;
+  providerEventType?: string | null;
 }
 
 function shortContentType(ct: string | null | undefined): string | null {
@@ -164,6 +167,12 @@ export function requestLog(
     parts.push(` ${chalk.cyan(`[${meta.endpointName}]`)}`);
   }
 
+  if (meta?.detectedProvider) {
+    const badge = providerBadge(meta.detectedProvider);
+    const eventLabel = meta.providerEventType ? chalk.dim(` ${meta.providerEventType}`) : "";
+    parts.push(` ${badge}${eventLabel}`);
+  }
+
   if (meta?.replay) {
     parts.push(`  ${chalk.dim("↺")} ${methodStr}  ${pathStr}`);
   } else {
@@ -188,6 +197,61 @@ export function requestLog(
   console.log(parts.join(""));
 }
 
+export interface ProviderSetupOpts {
+  providerName: string;
+  secret: string;
+  targetUrl: string;
+  webhookUrl?: string;
+  endpointId?: string;
+  dashboardUrl?: string;
+  setupInstructions: string;
+  suggestedEvents: string[];
+}
+
+export function providerSetupInfo(opts: ProviderSetupOpts): void {
+  console.log();
+  console.log(chalk.bold.cyan(` ${opts.providerName} Provider Setup`));
+  console.log();
+  console.log(chalk.gray(" Provider:   ") + chalk.bold(opts.providerName));
+  console.log(chalk.gray(" Forwarding: ") + chalk.green(opts.targetUrl));
+
+  if (opts.webhookUrl) {
+    console.log(chalk.gray(" Webhook URL:") + " " + chalk.underline(opts.webhookUrl));
+  }
+
+  console.log(chalk.gray(" Secret:     ") + chalk.yellow(opts.secret));
+  console.log(
+    chalk.gray("             ") +
+      chalk.dim("(paste this into your webhook settings)")
+  );
+  console.log();
+
+  if (opts.suggestedEvents.length > 0) {
+    console.log(
+      chalk.gray(" Suggested events: ") + opts.suggestedEvents.join(", ")
+    );
+  }
+  console.log(chalk.gray(" Setup:      ") + opts.setupInstructions);
+
+  if (opts.dashboardUrl) {
+    console.log(chalk.gray(" Dashboard:  ") + chalk.underline(opts.dashboardUrl));
+  }
+
+  console.log();
+}
+
+export function providerBadge(providerName: string | undefined): string {
+  if (!providerName) return "";
+  const colors: Record<string, (s: string) => string> = {
+    github: chalk.bgWhite.black,
+    stripe: chalk.bgMagenta.white,
+    shopify: chalk.bgGreen.white,
+    twilio: chalk.bgRed.white,
+  };
+  const colorFn = colors[providerName.toLowerCase()] || chalk.bgGray.white;
+  return colorFn(` ${providerName} `);
+}
+
 export function info(message: string): void {
   console.log(` ${chalk.gray(timestamp())} ${chalk.blue("ℹ")} ${message}`);
 }
@@ -202,4 +266,18 @@ export function warn(message: string): void {
 
 export function error(message: string): void {
   console.log(` ${chalk.gray(timestamp())} ${chalk.red("✗")} ${message}`);
+}
+
+export async function confirm(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    return false;
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(` ${chalk.yellow("?")} ${question} ${chalk.gray("(y/n)")} `, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+    });
+  });
 }

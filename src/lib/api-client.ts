@@ -13,6 +13,8 @@ export interface EndpointData {
   id: string;
   name: string;
   custom_id: string | null;
+  provider: string | null;
+  provider_config: Record<string, any> | null;
   webhook_url: string;
   tunnel_active: boolean;
   created_at: string;
@@ -28,6 +30,10 @@ export interface TicketResponse {
   expires_in: number;
   endpoint_id?: string;
 }
+
+export type SignatureConfigResult =
+  | { conflict: true; error: string; message: string; existing_provider: string }
+  | { conflict: false; data: { id: number; provider: string; enabled: boolean } };
 
 export interface CliAuthExchangeResponse {
   data: {
@@ -77,8 +83,44 @@ export class ApiClient {
     return this.request("GET", "/api/v1/endpoints");
   }
 
-  async createEndpoint(name: string): Promise<{ data: EndpointData }> {
-    return this.request("POST", "/api/v1/endpoints", { endpoint: { name } });
+  async createEndpoint(
+    name: string,
+    opts?: { provider?: string; provider_config?: Record<string, any> }
+  ): Promise<{ data: EndpointData }> {
+    const params: Record<string, any> = { name };
+    if (opts?.provider) params.provider = opts.provider;
+    if (opts?.provider_config) params.provider_config = opts.provider_config;
+    return this.request("POST", "/api/v1/endpoints", { endpoint: params });
+  }
+
+  async createSignatureConfig(
+    endpointId: string,
+    params: { provider: string; secret: string; enabled?: boolean },
+    force?: boolean
+  ): Promise<SignatureConfigResult> {
+    const url = `/api/v1/endpoints/${endpointId}/signature_configs${force ? "?force=true" : ""}`;
+    const res = await fetch(`${this.baseUrl}${url}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ signature_config: params }),
+    });
+
+    if (res.status === 409) {
+      const body = await res.json();
+      return { conflict: true, error: body.error, message: body.message, existing_provider: body.existing_provider };
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`API error ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+    }
+
+    const json = await res.json();
+    return { conflict: false, data: json.data };
   }
 
   async getTunnelTicket(endpointId: string): Promise<TicketResponse> {
@@ -92,6 +134,7 @@ export class ApiClient {
     response_time_ms: number;
     target_url: string;
     response_message?: string;
+    failure_category?: string;
   }): Promise<void> {
     await this.request("POST", "/api/v1/tunnel/delivery_reports", data);
   }
@@ -154,6 +197,7 @@ export async function reportAnonymousDelivery(
     response_time_ms: number;
     target_url: string;
     response_message?: string;
+    failure_category?: string;
   },
   host?: string
 ): Promise<void> {
@@ -174,6 +218,32 @@ export async function reportAnonymousDelivery(
   }
 }
 
+export async function createAnonymousSignatureConfig(
+  tunnelKey: string,
+  params: { provider: string; secret: string; enabled?: boolean },
+  host?: string
+): Promise<SignatureConfigResult> {
+  const baseUrl = getBaseUrl(host);
+  const res = await fetch(`${baseUrl}/api/v1/tunnel/signature_config_anonymous`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ tunnel_key: tunnelKey, signature_config: params }),
+  });
+
+  if (res.status === 409) {
+    const body = await res.json();
+    return { conflict: true, error: body.error, message: body.message, existing_provider: body.existing_provider };
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API error ${res.status}: ${text.slice(0, 200) || res.statusText}`);
+  }
+
+  const json = await res.json();
+  return { conflict: false, data: json.data };
+}
+
 interface RawMissedWebhookData {
   type: string;
   id: string;
@@ -188,6 +258,8 @@ interface RawMissedWebhookData {
   content_type: string | null;
   ip_address: string | null;
   requested_at: string;
+  detected_provider: string | null;
+  provider_event_data: Record<string, any> | null;
 }
 
 export interface MissedWebhookData {
@@ -204,6 +276,8 @@ export interface MissedWebhookData {
   content_type: string | null;
   ip_address: string | null;
   requested_at: string;
+  detected_provider: string | null;
+  provider_event_data: Record<string, any> | null;
 }
 
 function deserializeMissedWebhook(raw: RawMissedWebhookData): MissedWebhookData {
