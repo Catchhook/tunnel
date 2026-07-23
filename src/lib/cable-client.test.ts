@@ -78,7 +78,16 @@ describe("cable-client", () => {
       await connectTunnel(auth, callbacks);
 
       expect(mockConsumer.subscriptions.create).toHaveBeenCalledWith(
-        { channel: "TunnelChannel", endpoint_id: "ep_123", client_id: expect.any(String) },
+        expect.objectContaining({
+          channel: "TunnelChannel",
+          endpoint_id: "ep_123",
+          client_id: expect.any(String),
+          client_metadata: {
+            hostname: expect.any(String),
+            os: expect.any(String),
+            arch: expect.any(String),
+          },
+        }),
         expect.any(Object)
       );
     });

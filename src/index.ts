@@ -111,6 +111,7 @@ program
   .option("--token <token>", "API token (also saved locally)")
   .option("--auth-code <code>", "One-time auth code from /auth/cli")
   .option("--no-browser", "Don't try to open browser for auto-auth")
+  .option("--catch-up <mode>", "Recovery mode: prompt, all, recent, or none")
   .action(async (target, options) => {
     ui.banner(VERSION);
     await startCommand(target, options);
@@ -125,6 +126,7 @@ program
   .option("-k, --key <tunnel_key>", "Tunnel key for anonymous mode")
   .option("-p, --port <port>", "Local port to forward to (default: 3000)")
   .option("--host <host>", "CatchHook server host")
+  .option("--catch-up <mode>", "Recovery mode: prompt, all, recent, or none")
   .action(async (endpointId, options) => {
     if (endpointId && options.key) {
       ui.banner(VERSION);

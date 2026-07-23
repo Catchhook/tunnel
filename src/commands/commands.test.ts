@@ -53,6 +53,7 @@ const mockRunMultiTunnel = vi.fn().mockResolvedValue(undefined);
 vi.mock("../lib/tunnel-session.js", () => ({
   runSingleTunnel: (...args: any[]) => mockRunSingleTunnel(...args),
   runMultiTunnel: (...args: any[]) => mockRunMultiTunnel(...args),
+  defaultCatchUpMode: () => "recent",
   setupShutdown: vi.fn(),
 }));
 
@@ -215,7 +216,8 @@ describe("startCommand", () => {
       "http://localhost:4000",
       null,
       expect.objectContaining({ id: "ep_abc" }),
-      expect.any(Function)
+      expect.any(Function),
+      "recent"
     );
   });
 
@@ -260,8 +262,43 @@ describe("startCommand", () => {
       "http://localhost:3000",
       expect.any(Object),
       ep,
-      expect.any(Function)
+      expect.any(Function),
+      "recent"
     );
+  });
+
+  it("passes an explicit durable catch-up mode to the tunnel session", async () => {
+    vi.mocked(getStoredHost).mockReturnValue(undefined);
+    mockEnsureAuthenticatedToken.mockResolvedValue({
+      token: "chk_test",
+      identity: STUB_IDENTITY,
+    });
+    const ep = stubEndpoint();
+    mockResolveEndpoints.mockResolvedValue([ep]);
+
+    startCommand(undefined, { endpoint: ["ep_123"], catchUp: "all" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(mockRunSingleTunnel).toHaveBeenCalledWith(
+      expect.any(Object),
+      "http://localhost:3000",
+      expect.any(Object),
+      ep,
+      expect.any(Function),
+      "all"
+    );
+  });
+
+  it("rejects an unknown catch-up mode before connecting", async () => {
+    await expect(startCommand(undefined, {
+      endpoint: ["ep_123"],
+      catchUp: "everything",
+    })).rejects.toThrow("process.exit");
+
+    expect(ui.error).toHaveBeenCalledWith(
+      "--catch-up must be one of: prompt, all, recent, none."
+    );
+    expect(mockEnsureAuthenticatedToken).not.toHaveBeenCalled();
   });
 
   it("starts multi-endpoint tunnel with --all flag", async () => {
@@ -294,7 +331,8 @@ describe("startCommand", () => {
       "http://localhost:3000",
       expect.any(Object),
       endpoints,
-      expect.any(Function)
+      expect.any(Function),
+      "recent"
     );
   });
 

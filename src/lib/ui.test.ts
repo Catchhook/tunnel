@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { banner, connectionInfo, requestLog, info, success, warn, error } from "./ui.js";
+import { banner, confirm, connectionInfo, requestLog, info, success, warn, error } from "./ui.js";
 import type { ForwardResult } from "./forwarder.js";
 
 describe("ui", () => {
@@ -110,6 +110,25 @@ describe("ui", () => {
       error("test error");
       const output = consoleSpy.mock.calls[0][0];
       expect(output).toContain("test error");
+    });
+  });
+
+  describe("confirm", () => {
+    it("resolves false when its signal was already aborted", async () => {
+      const isTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+      Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
+      const controller = new AbortController();
+      controller.abort();
+
+      try {
+        await expect(confirm("Continue?", controller.signal)).resolves.toBe(false);
+      } finally {
+        if (isTTYDescriptor) {
+          Object.defineProperty(process.stdin, "isTTY", isTTYDescriptor);
+        } else {
+          Reflect.deleteProperty(process.stdin, "isTTY");
+        }
+      }
     });
   });
 });

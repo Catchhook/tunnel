@@ -1,5 +1,6 @@
 import { createConsumer, adapters, type Consumer, type Subscription } from "@rails/actioncable";
 import { randomUUID } from "node:crypto";
+import { arch, hostname, platform } from "node:os";
 import WebSocket from "ws";
 import { getHost, getProtocol, getWsProtocol } from "./constants.js";
 import { ApiClient, getAnonymousTunnelTicket } from "./api-client.js";
@@ -199,7 +200,17 @@ export async function connectMultiTunnel(
     let monitorKilled = false;
 
     const channel = consumer.subscriptions.create(
-      { channel: "TunnelChannel", endpoint_id: endpointId, client_id: clientId, target_url: targetUrl },
+      {
+        channel: "TunnelChannel",
+        endpoint_id: endpointId,
+        client_id: clientId,
+        target_url: targetUrl,
+        client_metadata: {
+          hostname: hostname(),
+          os: platform(),
+          arch: arch(),
+        },
+      },
       {
         connected() {
           debug(`connected() fired for endpoint ${endpointId}, gen=${generation}`);

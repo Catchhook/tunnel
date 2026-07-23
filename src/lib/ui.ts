@@ -268,16 +268,35 @@ export function error(message: string): void {
   console.log(` ${chalk.gray(timestamp())} ${chalk.red("✗")} ${message}`);
 }
 
-export async function confirm(question: string): Promise<boolean> {
+export async function confirm(question: string, signal?: AbortSignal): Promise<boolean> {
   if (!process.stdin.isTTY) {
     return false;
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
-    rl.question(` ${chalk.yellow("?")} ${question} ${chalk.gray("(y/n)")} `, (answer) => {
+    let settled = false;
+
+    function finish(answer: boolean): void {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", handleAbort);
       rl.close();
-      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+      resolve(answer);
+    }
+
+    function handleAbort(): void {
+      finish(false);
+    }
+
+    if (signal?.aborted) {
+      finish(false);
+      return;
+    }
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    rl.question(` ${chalk.yellow("?")} ${question} ${chalk.gray("(y/n)")} `, (answer) => {
+      const normalized = answer.trim().toLowerCase();
+      finish(normalized === "y" || normalized === "yes");
     });
   });
 }

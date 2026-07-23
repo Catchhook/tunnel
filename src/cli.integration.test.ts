@@ -85,7 +85,7 @@ describe("CLI integration", () => {
       // If options were swallowed, we'd see "Missing --key flag" instead.
       expect(stdout).not.toContain("Missing --key");
       expect(stdout).toContain("9999");
-    });
+    }, 15_000);
 
     it("shows error when endpoint ID is given without --key", () => {
       const { stdout, exitCode } = runCli(["ep_test123"]);

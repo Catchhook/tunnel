@@ -31,6 +31,52 @@ export interface TicketResponse {
   endpoint_id?: string;
 }
 
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export interface TunnelGapCounts {
+  total_count: number;
+  retained_count: number;
+  pending_count: number;
+  recovered_count: number;
+  failed_count: number;
+  expired_count: number;
+}
+
+export interface TunnelGapData {
+  id: string;
+  endpoint_id: string;
+  endpoint_name: string;
+  workspace_id: string | null;
+  status: "open" | "reconnected" | "recovered" | "partial" | "skipped" | "dismissed";
+  started_at: string;
+  detected_at: string;
+  reconnected_at: string | null;
+  target_url: string | null;
+  client_hostname: string | null;
+  recovery_outcome: string | null;
+  retention_truncated: boolean;
+  counts: TunnelGapCounts;
+}
+
+export interface GapRequestsPage {
+  data: MissedWebhookData[];
+  meta: {
+    gap_id: string;
+    started_at: string;
+    detected_at: string;
+    total_count: number;
+    pending_count: number;
+    returned_count: number;
+    next_cursor: string | null;
+    retention_truncated: boolean;
+  };
+}
+
 export type SignatureConfigResult =
   | { conflict: true; error: string; message: string; existing_provider: string }
   | { conflict: false; data: { id: number; provider: string; enabled: boolean } };
@@ -69,7 +115,7 @@ export class ApiClient {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       const summary = text.length > 200 ? text.slice(0, 200) + "…" : text;
-      throw new Error(`API error ${res.status}: ${summary || res.statusText}`);
+      throw new ApiError(res.status, `API error ${res.status}: ${summary || res.statusText}`);
     }
 
     return res.json() as Promise<T>;
@@ -163,6 +209,57 @@ export class ApiClient {
       "GET", `/api/v1/tunnel/undelivered?${params.toString()}`
     );
     return resp.data.map(deserializeMissedWebhook);
+  }
+
+  async getTunnelGaps(endpointIds: string[]): Promise<TunnelGapData[]> {
+    const params = new URLSearchParams();
+    for (const id of endpointIds) {
+      params.append("endpoint_ids[]", id);
+    }
+    const resp = await this.request<{ data: TunnelGapData[] }>(
+      "GET", `/api/v1/tunnel/gaps?${params.toString()}`
+    );
+    return resp.data;
+  }
+
+  async getGapRequests(
+    endpointIds: string[],
+    gapId: string,
+    cursor?: string,
+    limit = 100
+  ): Promise<GapRequestsPage> {
+    const params = new URLSearchParams({ gap_id: gapId, limit: String(limit) });
+    for (const id of endpointIds) {
+      params.append("endpoint_ids[]", id);
+    }
+    if (cursor) params.set("cursor", cursor);
+
+    const resp = await this.request<{
+      data: RawMissedWebhookData[];
+      meta: GapRequestsPage["meta"];
+    }>("GET", `/api/v1/tunnel/undelivered?${params.toString()}`);
+
+    return {
+      data: resp.data.map(deserializeMissedWebhook),
+      meta: resp.meta,
+    };
+  }
+
+  async reportGapRecovery(
+    gapId: string,
+    report: {
+      outcome: "completed" | "partial" | "skipped" | "interrupted";
+      attempted_count: number;
+      succeeded_count: number;
+      failed_count: number;
+    }
+  ): Promise<TunnelGapData> {
+    const resp = await this.request<{ data: TunnelGapData }>(
+      "POST",
+      `/api/v1/tunnel/gaps/${encodeURIComponent(gapId)}/recovery`,
+      report
+    );
+    return resp.data;
   }
 }
 

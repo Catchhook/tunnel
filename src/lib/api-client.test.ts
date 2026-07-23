@@ -450,3 +450,110 @@ describe("ApiClient.getUndeliveredRequests", () => {
     expect(result).toEqual([]);
   });
 });
+
+describe("ApiClient tunnel gap recovery", () => {
+  const gap = {
+    id: "tgap_123",
+    endpoint_id: "ep_1",
+    endpoint_name: "Payments",
+    workspace_id: "ws_1",
+    status: "reconnected",
+    started_at: "2026-07-10T12:00:00Z",
+    detected_at: "2026-07-10T12:01:00Z",
+    reconnected_at: "2026-07-17T12:00:00Z",
+    target_url: "http://localhost:3000",
+    client_hostname: "laptop",
+    recovery_outcome: null,
+    retention_truncated: false,
+    counts: {
+      total_count: 1,
+      retained_count: 1,
+      pending_count: 1,
+      recovered_count: 0,
+      failed_count: 0,
+      expired_count: 0,
+    },
+  };
+
+  it("discovers unresolved gaps for requested endpoints", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: [gap] }));
+    const client = new ApiClient("chk_test", "catchhook.app");
+
+    const result = await client.getTunnelGaps(["ep_1", "ep_2"]);
+
+    expect(result[0].id).toBe("tgap_123");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/tunnel/gaps?");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_1");
+    expect(url).toContain("endpoint_ids%5B%5D=ep_2");
+  });
+
+  it("fetches and deserializes a cursor page", async () => {
+    const rawRequest = {
+      type: "webhook_request",
+      id: "req_1",
+      endpoint_id: "ep_1",
+      method: "POST",
+      path: "/hooks",
+      headers: {},
+      body: Buffer.from("hello").toString("base64"),
+      body_encoding: "base64",
+      body_size: 5,
+      query_parameters: {},
+      content_type: "text/plain",
+      ip_address: null,
+      requested_at: "2026-07-10T12:01:00Z",
+      detected_provider: null,
+      provider_event_data: null,
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse({
+      data: [rawRequest],
+      meta: {
+        gap_id: "tgap_123",
+        started_at: gap.started_at,
+        detected_at: gap.detected_at,
+        total_count: 1,
+        pending_count: 1,
+        returned_count: 1,
+        next_cursor: "next-token",
+        retention_truncated: false,
+      },
+    }));
+    const client = new ApiClient("chk_test", "catchhook.app");
+
+    const page = await client.getGapRequests(["ep_1"], "tgap_123", "cursor-token", 50);
+
+    expect(page.data[0].body?.toString()).toBe("hello");
+    expect(page.meta.next_cursor).toBe("next-token");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("gap_id=tgap_123");
+    expect(url).toContain("cursor=cursor-token");
+    expect(url).toContain("limit=50");
+  });
+
+  it("reports recovery counts", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ data: { ...gap, status: "recovered" } }));
+    const client = new ApiClient("chk_test", "catchhook.app");
+
+    const result = await client.reportGapRecovery("tgap_123", {
+      outcome: "completed",
+      attempted_count: 1,
+      succeeded_count: 1,
+      failed_count: 0,
+    });
+
+    expect(result.status).toBe("recovered");
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://catchhook.app/api/v1/tunnel/gaps/tgap_123/recovery",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          outcome: "completed",
+          attempted_count: 1,
+          succeeded_count: 1,
+          failed_count: 0,
+        }),
+      })
+    );
+  });
+});

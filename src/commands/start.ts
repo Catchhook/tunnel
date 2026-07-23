@@ -5,7 +5,12 @@ import { ApiClient, createAnonymousSignatureConfig, type EndpointData } from "..
 import type { AuthMode } from "../lib/cable-client.js";
 import { loginCommand } from "./login.js";
 import { resolveEndpoints } from "../lib/endpoint-resolver.js";
-import { runSingleTunnel, runMultiTunnel } from "../lib/tunnel-session.js";
+import {
+  runSingleTunnel,
+  runMultiTunnel,
+  defaultCatchUpMode,
+  type CatchUpMode,
+} from "../lib/tunnel-session.js";
 import { getProviderPreset, resolveTargetUrl, VALID_PROVIDERS } from "../lib/providers.js";
 import * as ui from "../lib/ui.js";
 
@@ -20,6 +25,7 @@ export interface StartOptions {
   token?: string;
   authCode?: string;
   browser?: boolean;
+  catchUp?: string;
 }
 
 function generateSecret(): string {
@@ -31,6 +37,7 @@ export async function startCommand(
   options: StartOptions
 ): Promise<void> {
   const host = options.host || getStoredHost() || getHost();
+  const catchUpMode = resolveCatchUpMode(options.catchUp);
 
   // Validate --provider
   const providerPreset = options.provider
@@ -98,7 +105,7 @@ export async function startCommand(
       }
     }
 
-    await startAnonymousTunnel(endpointId, options.key, forwardTarget, host);
+    await startAnonymousTunnel(endpointId, options.key, forwardTarget, host, catchUpMode);
     return;
   }
 
@@ -150,7 +157,7 @@ export async function startCommand(
 
     const auth: AuthMode = { mode: "authenticated", token, endpointId: endpoint.id, host };
     const catchUpFetcher = (epIds: string[]) => client.getUndeliveredRequests(epIds, 120);
-    await runSingleTunnel(auth, targetUrl, client, endpoint, catchUpFetcher);
+    await runSingleTunnel(auth, targetUrl, client, endpoint, catchUpFetcher, catchUpMode);
     return;
   }
 
@@ -225,7 +232,7 @@ export async function startCommand(
 
     const auth: AuthMode = { mode: "authenticated", token, endpointId: endpoint.id, host };
     const catchUpFetcher = (epIds: string[]) => client.getUndeliveredRequests(epIds, 120);
-    await runSingleTunnel(auth, targetUrl, client, endpoint, catchUpFetcher);
+    await runSingleTunnel(auth, targetUrl, client, endpoint, catchUpFetcher, catchUpMode);
   } else {
     ui.connectionInfo({
       mode: "authenticated",
@@ -241,7 +248,7 @@ export async function startCommand(
     });
 
     const catchUpFetcher = (epIds: string[]) => client.getUndeliveredRequests(epIds, 120);
-    await runMultiTunnel(token, host, targetUrl, client, endpoints, catchUpFetcher);
+    await runMultiTunnel(token, host, targetUrl, client, endpoints, catchUpFetcher, catchUpMode);
   }
 }
 
@@ -249,7 +256,8 @@ async function startAnonymousTunnel(
   endpointId: string,
   tunnelKey: string,
   targetUrl: string,
-  host: string
+  host: string,
+  catchUpMode: CatchUpMode
 ): Promise<void> {
   const auth: AuthMode = { mode: "anonymous", tunnelKey, endpointId, host };
   const baseUrl = getBaseUrl(host);
@@ -276,6 +284,17 @@ async function startAnonymousTunnel(
     targetUrl,
     null,
     { id: endpointId, name: endpointId } as EndpointData,
-    catchUpFetcher
+    catchUpFetcher,
+    catchUpMode
   );
+}
+
+function resolveCatchUpMode(value?: string): CatchUpMode {
+  if (!value) return defaultCatchUpMode();
+  if (["prompt", "all", "recent", "none"].includes(value)) {
+    return value as CatchUpMode;
+  }
+
+  ui.error("--catch-up must be one of: prompt, all, recent, none.");
+  process.exit(1);
 }
