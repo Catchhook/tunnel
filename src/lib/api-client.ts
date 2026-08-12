@@ -29,10 +29,21 @@ export interface TicketResponse {
   ticket: string;
   expires_in: number;
   endpoint_id?: string;
+  tunnel_client_id?: string;
+  tunnel_client_credential?: string;
+  tunnel_protocol?: {
+    delivery_report_version: number;
+    evidence_body_limit: number;
+    capabilities: string[];
+  };
 }
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, message: string) {
+  constructor(
+    public readonly status: number,
+    message: string,
+    public readonly retryAfterMs?: number
+  ) {
     super(message);
     this.name = "ApiError";
   }
@@ -115,7 +126,10 @@ export class ApiClient {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       const summary = text.length > 200 ? text.slice(0, 200) + "…" : text;
-      throw new ApiError(res.status, `API error ${res.status}: ${summary || res.statusText}`);
+      const retryAfterHeader = res.headers?.get?.("Retry-After");
+      const retryAfter = retryAfterHeader == null ? Number.NaN : Number(retryAfterHeader);
+      const retryAfterMs = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1_000 : undefined;
+      throw new ApiError(res.status, `API error ${res.status}: ${summary || res.statusText}`, retryAfterMs);
     }
 
     return res.json() as Promise<T>;
@@ -169,8 +183,13 @@ export class ApiClient {
     return { conflict: false, data: json.data };
   }
 
-  async getTunnelTicket(endpointId: string): Promise<TicketResponse> {
-    return this.request("POST", "/api/v1/tunnel/connect", { endpoint_id: endpointId });
+  async getTunnelTicket(endpointId: string, identity?: {
+    installation_id: string;
+    client_name: string;
+    client_metadata: Record<string, string>;
+    capabilities: string[];
+  }): Promise<TicketResponse> {
+    return this.request("POST", "/api/v1/tunnel/connect", { endpoint_id: endpointId, ...identity });
   }
 
   async reportDelivery(data: {
@@ -181,8 +200,13 @@ export class ApiClient {
     target_url: string;
     response_message?: string;
     failure_category?: string;
-  }): Promise<void> {
-    await this.request("POST", "/api/v1/tunnel/delivery_reports", data);
+    [key: string]: unknown;
+  }): Promise<{ status: string; evidence_status?: string }> {
+    return this.request("POST", "/api/v1/tunnel/delivery_reports", data);
+  }
+
+  async reportTunnelReplayResult(data: Record<string, unknown>): Promise<void> {
+    await this.request("POST", "/api/v1/tunnel/replay_results", data);
   }
 
   async getMissedRequests(endpointIds: string[], since: string): Promise<MissedWebhookData[]> {
@@ -295,6 +319,7 @@ export async function reportAnonymousDelivery(
     target_url: string;
     response_message?: string;
     failure_category?: string;
+    [key: string]: unknown;
   },
   host?: string
 ): Promise<void> {
@@ -311,7 +336,10 @@ export async function reportAnonymousDelivery(
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     const summary = text.length > 200 ? text.slice(0, 200) + "…" : text;
-    throw new Error(`API error ${res.status}: ${summary || res.statusText}`);
+    const retryAfterHeader = res.headers?.get?.("Retry-After");
+    const retryAfter = retryAfterHeader == null ? Number.NaN : Number(retryAfterHeader);
+    const retryAfterMs = Number.isFinite(retryAfter) && retryAfter >= 0 ? retryAfter * 1_000 : undefined;
+    throw new ApiError(res.status, `API error ${res.status}: ${summary || res.statusText}`, retryAfterMs);
   }
 }
 

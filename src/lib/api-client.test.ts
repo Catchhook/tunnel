@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { ApiClient, getAnonymousTunnelTicket, reportAnonymousDelivery } from "./api-client.js";
+import { ApiClient, ApiError, getAnonymousTunnelTicket, reportAnonymousDelivery } from "./api-client.js";
 
 // Mock global fetch
 const mockFetch = vi.fn();
@@ -151,6 +151,21 @@ describe("ApiClient", () => {
   });
 
   describe("error handling", () => {
+    it("exposes Retry-After guidance on rate limits", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { get: (name: string) => name.toLowerCase() === "retry-after" ? "7" : null },
+        text: () => Promise.resolve('{"error":"rate_limited"}'),
+      });
+
+      const error = await client.listEndpoints().catch((caught) => caught);
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.retryAfterMs).toBe(7_000);
+    });
+
     it("includes response body text in error message", async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -274,6 +289,29 @@ describe("reportAnonymousDelivery", () => {
         target_url: "http://localhost:3000",
       })
     ).rejects.toThrow("API error 401");
+  });
+
+  it("exposes anonymous rate limits through ApiError", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      headers: new Headers({ "Retry-After": "4" }),
+      text: () => Promise.resolve('{"error":"rate_limited"}'),
+    });
+
+    const error = await reportAnonymousDelivery({
+      tunnel_key: "key",
+      webhook_request_id: "req_1",
+      endpoint_id: "ep_1",
+      status_code: 200,
+      response_time_ms: 10,
+      target_url: "http://localhost:3000",
+    }).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(429);
+    expect(error.retryAfterMs).toBe(4_000);
   });
 });
 

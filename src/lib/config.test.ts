@@ -7,6 +7,7 @@ import {
   setStoredHost,
   clearStoredHost,
   clearConfig,
+  claimReplayCommand,
   getConfigPath,
   resolveToken,
   ensureAuthenticatedToken,
@@ -53,6 +54,14 @@ describe("config", () => {
       clearConfig();
       expect(getStoredToken()).toBeUndefined();
       expect(getStoredHost()).toBeUndefined();
+    });
+  });
+
+  describe("replay command journal", () => {
+    it("rejects invalid and expired command expirations without claiming them", () => {
+      expect(claimReplayCommand("cmd-invalid", "not-a-date")).toBe(false);
+      expect(claimReplayCommand("cmd-expired", new Date(Date.now() - 1_000).toISOString())).toBe(false);
+      expect(claimReplayCommand("cmd-valid", new Date(Date.now() + 60_000).toISOString())).toBe(true);
     });
   });
 

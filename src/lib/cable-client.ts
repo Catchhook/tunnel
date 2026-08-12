@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { arch, hostname, platform } from "node:os";
 import WebSocket from "ws";
 import { getHost, getProtocol, getWsProtocol } from "./constants.js";
-import { ApiClient, getAnonymousTunnelTicket } from "./api-client.js";
+import { ApiClient, getAnonymousTunnelTicket, type TicketResponse } from "./api-client.js";
+import { getInstallationIdentity } from "./config.js";
 
 const DEBUG = !!process.env.DEBUG;
 
@@ -66,6 +67,20 @@ export interface WebhookData {
   provider_event_data: Record<string, any> | null;
 }
 
+export interface TunnelReplayCommand {
+  type: "tunnel_replay_command";
+  command_id: string;
+  replay_case_run_id: string;
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body_base64: string;
+  timeout_ms: number;
+  evidence_body_limit: number;
+  expires_at: string;
+  result_token: string;
+}
+
 export type AuthMode =
   | { mode: "authenticated"; token: string; endpointId: string; host?: string }
   | { mode: "anonymous"; tunnelKey: string; endpointId: string; host?: string };
@@ -78,6 +93,9 @@ interface TunnelConnection {
   channel: Subscription;
   heartbeatInterval: ReturnType<typeof setInterval>;
   disconnect: () => void;
+  readonly tunnelProtocol?: TicketResponse["tunnel_protocol"];
+  readonly tunnelClientId?: string;
+  readonly tunnelClientCredential?: string;
 }
 
 export interface EndpointSubscription {
@@ -91,23 +109,31 @@ export interface MultiTunnelConnection {
   subscriptions: EndpointSubscription[];
   addEndpoint: (endpointId: string, callbacks: EndpointCallbacks) => EndpointSubscription;
   disconnect: () => void;
+  readonly tunnelProtocol?: TicketResponse["tunnel_protocol"];
+  readonly tunnelClientId?: string;
+  readonly tunnelClientCredential?: string;
 }
 
 export interface EndpointCallbacks {
   onWebhook: (data: WebhookData) => void;
+  onTunnelReplay?: (command: TunnelReplayCommand) => void;
   onRejected?: () => void;
 }
 
-async function getTicketForAuth(auth: MultiAuthMode, endpointId?: string): Promise<string> {
+async function getTicketForAuth(auth: MultiAuthMode, endpointId?: string): Promise<TicketResponse> {
   const host = auth.host;
 
   if (auth.mode === "authenticated") {
     const client = new ApiClient(auth.token, host);
-    const data = await client.getTunnelTicket(endpointId || "any");
-    return data.ticket;
+    const identity = getInstallationIdentity();
+    return client.getTunnelTicket(endpointId || "any", {
+      installation_id: identity.installationId,
+      client_name: identity.clientName,
+      client_metadata: { hostname: hostname(), os: platform(), arch: arch() },
+      capabilities: ["delivery_response_evidence_v2", "tunnel_replay_v1"],
+    });
   } else {
-    const data = await getAnonymousTunnelTicket(auth.tunnelKey, host);
-    return data.ticket;
+    return getAnonymousTunnelTicket(auth.tunnelKey, host);
   }
 }
 
@@ -165,6 +191,7 @@ export async function connectMultiTunnel(
   debug("clientId:", clientId);
 
   let currentConsumer: Consumer;
+  let currentTicket: TicketResponse;
   let reconnectAttempts = 0;
   const maxReconnectDelay = 30_000;
   let reconnecting = false;
@@ -250,6 +277,13 @@ export async function connectMultiTunnel(
         },
 
         received(data: any) {
+          if (data.type === "tunnel_replay_command") {
+            void Promise.resolve().then(() => callbacks.onTunnelReplay?.(data as TunnelReplayCommand)).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              debug(`tunnel replay command failed: ${message}`);
+            });
+            return;
+          }
           if (data.type !== "webhook_request") return;
 
           let bodyBuffer: Buffer | null = null;
@@ -286,7 +320,7 @@ export async function connectMultiTunnel(
     await new Promise((r) => setTimeout(r, delay));
 
     const firstEndpointId = endpointEntries.keys().next().value;
-    let newTicket: string;
+    let newTicket: TicketResponse;
     try {
       newTicket = await getTicketForAuth(auth, firstEndpointId);
       debug("doReconnect: got fresh ticket");
@@ -300,7 +334,8 @@ export async function connectMultiTunnel(
       }
       throw ticketErr;
     }
-    const newUrl = `${wsProtocol}://${host}/cable?ticket=${newTicket}`;
+    currentTicket = newTicket;
+    const newUrl = `${wsProtocol}://${host}/cable?ticket=${newTicket.ticket}`;
 
     intentionalTeardownGeneration = connectionGeneration;
     connectionGeneration++;
@@ -350,7 +385,8 @@ export async function connectMultiTunnel(
     throw new Error("initialEndpointId is required for authenticated multi-tunnel connections");
   }
   const ticket = await getTicketForAuth(auth, ticketEndpointId);
-  const initialUrl = `${wsProtocol}://${host}/cable?ticket=${ticket}`;
+  currentTicket = ticket;
+  const initialUrl = `${wsProtocol}://${host}/cable?ticket=${ticket.ticket}`;
   debug("Initial connection to", initialUrl.replace(/ticket=.*/, "ticket=<redacted>"));
 
   currentConsumer = createConsumer(initialUrl);
@@ -379,6 +415,9 @@ export async function connectMultiTunnel(
     get subscriptions() { return Array.from(endpointEntries.values()).map((e) => e.sub); },
     addEndpoint,
     disconnect,
+    get tunnelProtocol() { return currentTicket.tunnel_protocol; },
+    get tunnelClientId() { return currentTicket.tunnel_client_id; },
+    get tunnelClientCredential() { return currentTicket.tunnel_client_credential; },
   };
 }
 
@@ -392,6 +431,7 @@ export async function connectTunnel(
     onConnected: () => void;
     onDisconnected: () => void;
     onWebhook: (data: WebhookData) => void;
+    onTunnelReplay?: (command: TunnelReplayCommand) => void;
     onReconnecting: () => void;
     onRejected?: () => void;
   },
@@ -410,6 +450,7 @@ export async function connectTunnel(
 
   const sub = multi.addEndpoint(auth.endpointId, {
     onWebhook: callbacks.onWebhook,
+    onTunnelReplay: callbacks.onTunnelReplay,
     onRejected: callbacks.onRejected,
   });
 
@@ -417,5 +458,8 @@ export async function connectTunnel(
     get channel() { return sub.channel; },
     get heartbeatInterval() { return sub.heartbeatInterval; },
     disconnect: multi.disconnect,
+    get tunnelProtocol() { return multi.tunnelProtocol; },
+    get tunnelClientId() { return multi.tunnelClientId; },
+    get tunnelClientCredential() { return multi.tunnelClientCredential; },
   };
 }

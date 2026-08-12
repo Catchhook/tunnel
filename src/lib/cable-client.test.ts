@@ -334,6 +334,56 @@ describe("cable-client", () => {
 
       expect(callbacks.onWebhook).not.toHaveBeenCalled();
     });
+
+    it("contains rejected tunnel replay handlers", async () => {
+      const auth: AuthMode = {
+        mode: "authenticated",
+        token: "chk_test",
+        endpointId: "ep_123",
+        host: "catchhook.localhost:3100",
+      };
+      const callbacks = {
+        onConnected: vi.fn(),
+        onDisconnected: vi.fn(),
+        onWebhook: vi.fn(),
+        onReconnecting: vi.fn(),
+        onTunnelReplay: vi.fn().mockRejectedValue(new Error("report failed")),
+      };
+
+      await connectTunnel(auth, callbacks);
+      (mockConsumer as any)._callbacks.received({ type: "tunnel_replay_command" });
+      await Promise.resolve();
+
+      expect(callbacks.onTunnelReplay).toHaveBeenCalledOnce();
+    });
+
+    it("contains synchronously thrown tunnel replay handlers", async () => {
+      const auth: AuthMode = {
+        mode: "authenticated",
+        token: "chk_test",
+        endpointId: "ep_123",
+        host: "catchhook.localhost:3100",
+      };
+      const callbacks = {
+        onConnected: vi.fn(),
+        onDisconnected: vi.fn(),
+        onWebhook: vi.fn(),
+        onReconnecting: vi.fn(),
+        onTunnelReplay: vi.fn(() => {
+          throw new Error("replay failed synchronously");
+        }),
+      };
+
+      await connectTunnel(auth, callbacks);
+
+      expect(() => {
+        (mockConsumer as any)._callbacks.received({ type: "tunnel_replay_command" });
+      }).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(callbacks.onTunnelReplay).toHaveBeenCalledOnce();
+    });
   });
 
   describe("connectMultiTunnel", () => {

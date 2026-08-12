@@ -6,7 +6,7 @@ const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 function mockResponse(status: number, statusText: string) {
-  return { status, statusText, text: () => Promise.resolve("") };
+  return new Response("", { status, statusText });
 }
 
 function makeWebhookData(overrides: Partial<WebhookData> = {}): WebhookData {
@@ -46,6 +46,41 @@ describe("forwardToLocalhost", () => {
     expect(mockFetch).toHaveBeenCalledWith(
       "http://localhost:3000/webhook",
       expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("preserves automatic redirects for legacy forwarding", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse(307, "Temporary Redirect"));
+
+    const result = await forwardToLocalhost(
+      makeWebhookData({ path: null }),
+      "http://localhost:3000/webhook",
+      64 * 1024,
+      5_000
+    );
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:3000/webhook",
+      expect.objectContaining({ redirect: "follow" })
+    );
+    expect(result.statusCode).toBe(307);
+    expect(result.failureCategory).toBe("http_error");
+  });
+
+  it("can disable automatic redirects for negotiated forwarding", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse(307, "Temporary Redirect"));
+
+    await forwardToLocalhost(
+      makeWebhookData({ path: null }),
+      "http://localhost:3000/webhook",
+      64 * 1024,
+      5_000,
+      "manual"
+    );
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://localhost:3000/webhook",
+      expect.objectContaining({ redirect: "manual" })
     );
   });
 
@@ -220,14 +255,103 @@ describe("forwardToLocalhost", () => {
     expect(opts.body).toBeUndefined();
   });
 
-  it("drains response body to prevent connection leaks", async () => {
-    const textFn = vi.fn().mockResolvedValue("response body");
-    mockFetch.mockResolvedValueOnce({ status: 200, statusText: "OK", text: textFn });
+  it("captures response body evidence while draining the response", async () => {
+    mockFetch.mockResolvedValueOnce(new Response("response body", {
+      status: 200,
+      statusText: "OK",
+      headers: { "content-type": "text/plain" },
+    }));
     const data = makeWebhookData();
 
-    await forwardToLocalhost(data, "http://localhost:3000");
+    const result = await forwardToLocalhost(data, "http://localhost:3000");
 
-    expect(textFn).toHaveBeenCalled();
+    expect(result.evidence.body).toBe("response body");
+    expect(result.evidence.bodyEncoding).toBe("utf8");
+    expect(result.evidence.captureComplete).toBe(true);
+  });
+
+  it("bounds evidence, excludes sensitive headers, and cancels an oversized response stream", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("too-large")); },
+      cancel() { cancelled = true; },
+    });
+    mockFetch.mockResolvedValueOnce(new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/plain", "set-cookie": "secret", "x-request-id": "safe" },
+    }));
+
+    const result = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000", 3);
+
+    expect(result.evidence.body).toBe("too");
+    expect(result.evidence.captureComplete).toBe(false);
+    expect(result.evidence.truncationReason).toBe("size_limit");
+    expect(result.evidence.headers).toEqual({ "content-type": "text/plain", "x-request-id": "safe" });
+    expect(cancelled).toBe(true);
+  });
+
+  it("fully drains legacy responses without retaining or cancelling them", async () => {
+    let cancelled = false;
+    let pulls = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls <= 3) controller.enqueue(new Uint8Array(32 * 1024));
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    });
+    mockFetch.mockResolvedValueOnce(new Response(stream, { status: 200 }));
+
+    const result = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000", null);
+
+    expect(pulls).toBe(4);
+    expect(cancelled).toBe(false);
+    expect(result.evidence.body).toBeNull();
+    expect(result.evidence.retainedBytes).toBe(0);
+  });
+
+  it("bounds the serialized allowlisted header evidence", async () => {
+    const large = "x".repeat(4096);
+    mockFetch.mockResolvedValueOnce(new Response("", {
+      status: 200,
+      headers: {
+        "content-type": large,
+        "content-length": large,
+        "location": large,
+        "x-request-id": large,
+        "x-correlation-id": large,
+      },
+    }));
+
+    const result = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000");
+
+    expect(Buffer.byteLength(JSON.stringify(result.evidence.headers))).toBeLessThanOrEqual(16 * 1024);
+    expect(Object.keys(result.evidence.headers).length).toBeLessThan(5);
+  });
+
+  it("captures binary evidence as base64 and records stream errors", async () => {
+    mockFetch.mockResolvedValueOnce(new Response(new Uint8Array([0xff, 0x00]), { status: 200 }));
+    const binary = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000");
+    expect(binary.evidence.bodyEncoding).toBe("base64");
+    expect(binary.evidence.body).toBe("/wA=");
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(new Error("broken stream")); },
+    });
+    mockFetch.mockResolvedValueOnce(new Response(stream, { status: 200 }));
+    const failed = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000");
+    expect(failed.evidence.captureComplete).toBe(false);
+    expect(failed.evidence.truncationReason).toBe("stream_error");
+
+    const timeout = new Error("response timed out");
+    timeout.name = "TimeoutError";
+    const timeoutStream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.error(timeout); },
+    });
+    mockFetch.mockResolvedValueOnce(new Response(timeoutStream, { status: 200 }));
+    const timedOut = await forwardToLocalhost(makeWebhookData(), "http://localhost:3000");
+    expect(timedOut.evidence.truncationReason).toBe("timeout");
   });
 
   it("handles ECONNREFUSED error", async () => {

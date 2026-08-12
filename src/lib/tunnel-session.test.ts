@@ -4,11 +4,14 @@ import {
   defaultCatchUpMode,
   runCatchUp,
   runConnectionCatchUp,
+  executeTunnelReplay,
+  reportTunnelReplayResultWithRetry,
   type DeliveryTracker,
   type CatchUpFetcher,
 } from "./tunnel-session.js";
-import type { WebhookData } from "./cable-client.js";
+import type { TunnelReplayCommand, WebhookData } from "./cable-client.js";
 import { ApiError, type ApiClient, type MissedWebhookData, type TunnelGapData } from "./api-client.js";
+import { claimReplayCommand } from "./config.js";
 
 vi.mock("./ui.js", () => ({
   info: vi.fn(),
@@ -25,6 +28,10 @@ vi.mock("./forwarder.js", () => ({
     statusText: "OK",
     responseTimeMs: 10,
   }),
+}));
+
+vi.mock("./config.js", () => ({
+  claimReplayCommand: vi.fn(() => true),
 }));
 
 function stubWebhook(overrides: Partial<WebhookData> = {}): WebhookData {
@@ -84,6 +91,163 @@ describe("createDeliveryTracker", () => {
     expect(tracker.forwardedIds.has("wr_0")).toBe(false);
     expect(tracker.forwardedIds.has("wr_9")).toBe(false);
     expect(tracker.forwardedIds.has("wr_509")).toBe(true);
+  });
+});
+
+function stubTunnelReplayCommand(overrides: Partial<TunnelReplayCommand> = {}): TunnelReplayCommand {
+  return {
+    type: "tunnel_replay_command",
+    command_id: "cmd_123",
+    replay_case_run_id: "rcr_123",
+    method: "POST",
+    url: "http://localhost:3000/hooks",
+    headers: { "content-type": "application/json" },
+    body_base64: Buffer.from("{}").toString("base64"),
+    timeout_ms: 5_000,
+    evidence_body_limit: 65_536,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+    result_token: "signed-result-token",
+    ...overrides,
+  };
+}
+
+describe("executeTunnelReplay", () => {
+  const targetUrl = "http://localhost:3000";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(claimReplayCommand).mockReturnValue(true);
+  });
+
+  it("ignores expired and invalid commands before claiming them", async () => {
+    const { claimReplayCommand } = await import("./config.js");
+    const client = { reportTunnelReplayResult: vi.fn() } as unknown as ApiClient;
+
+    await executeTunnelReplay(stubTunnelReplayCommand({ expires_at: "not-a-date" }), targetUrl, client);
+    await executeTunnelReplay(stubTunnelReplayCommand({ expires_at: new Date(Date.now() - 1_000).toISOString() }), targetUrl, client);
+
+    expect(claimReplayCommand).not.toHaveBeenCalled();
+    expect(client.reportTunnelReplayResult).not.toHaveBeenCalled();
+  });
+
+  it("does not execute commands that are already claimed", async () => {
+    const { claimReplayCommand } = await import("./config.js");
+    const { forwardToLocalhost } = await import("./forwarder.js");
+    vi.mocked(claimReplayCommand).mockReturnValue(false);
+    const client = { reportTunnelReplayResult: vi.fn() } as unknown as ApiClient;
+
+    await executeTunnelReplay(stubTunnelReplayCommand(), targetUrl, client);
+
+    expect(forwardToLocalhost).not.toHaveBeenCalled();
+    expect(client.reportTunnelReplayResult).not.toHaveBeenCalled();
+  });
+
+  it("reports a blocked result when the command origin differs from the tunnel target", async () => {
+    const client = { reportTunnelReplayResult: vi.fn().mockResolvedValue(undefined) } as unknown as ApiClient;
+
+    await executeTunnelReplay(stubTunnelReplayCommand({ url: "http://example.test/hooks" }), targetUrl, client);
+
+    expect(client.reportTunnelReplayResult).toHaveBeenCalledWith(expect.objectContaining({
+      status_code: 0,
+      failure_category: "unknown_error",
+      request_may_have_been_sent: false,
+    }));
+  });
+
+  it("rejects replay commands outside the configured target path", async () => {
+    const { forwardToLocalhost } = await import("./forwarder.js");
+    const client = { reportTunnelReplayResult: vi.fn().mockResolvedValue(undefined) } as unknown as ApiClient;
+
+    await executeTunnelReplay(
+      stubTunnelReplayCommand({ url: "http://localhost:3000/admin" }),
+      "http://localhost:3000/hooks",
+      client
+    );
+
+    expect(forwardToLocalhost).not.toHaveBeenCalled();
+    expect(client.reportTunnelReplayResult).toHaveBeenCalledWith(expect.objectContaining({
+      status_code: 0,
+      request_may_have_been_sent: false,
+    }));
+  });
+
+  it("rejects encoded traversal in replay command paths", async () => {
+    const { forwardToLocalhost } = await import("./forwarder.js");
+    const client = { reportTunnelReplayResult: vi.fn().mockResolvedValue(undefined) } as unknown as ApiClient;
+
+    await executeTunnelReplay(
+      stubTunnelReplayCommand({ url: "http://localhost:3000/hooks/%252e%252e%252fadmin" }),
+      "http://localhost:3000/hooks",
+      client
+    );
+
+    expect(forwardToLocalhost).not.toHaveBeenCalled();
+  });
+
+  it("forwards an accepted command and reports its captured response", async () => {
+    const { forwardToLocalhost } = await import("./forwarder.js");
+    vi.mocked(forwardToLocalhost).mockResolvedValueOnce({
+      statusCode: 201,
+      statusText: "Created",
+      responseTimeMs: 9,
+      error: undefined,
+      failureCategory: undefined,
+      resolvedUrl: "http://localhost:3000/hooks",
+      evidence: {
+        contentType: "application/json", headers: { "content-type": "application/json" }, body: "{}",
+        bodyEncoding: "utf8", declaredContentLength: 2, decodedBytesObserved: 2, retainedBytes: 2,
+        captureComplete: true, truncationReason: null,
+      },
+    });
+    const client = { reportTunnelReplayResult: vi.fn().mockResolvedValue(undefined) } as unknown as ApiClient;
+
+    await executeTunnelReplay(stubTunnelReplayCommand(), targetUrl, client);
+
+    expect(forwardToLocalhost).toHaveBeenCalledWith(expect.objectContaining({ method: "POST" }), "http://localhost:3000/hooks", 65_536, 5_000, "manual");
+    expect(client.reportTunnelReplayResult).toHaveBeenCalledWith(expect.objectContaining({
+      command_id: "cmd_123", status_code: 201, body: "{}", body_encoding: "utf8", capture_complete: true,
+    }));
+  });
+
+  it("does not start local delivery when the command expires during preparation", async () => {
+    const { forwardToLocalhost } = await import("./forwarder.js");
+    const client = { reportTunnelReplayResult: vi.fn() } as unknown as ApiClient;
+    const expiry = Date.now() + 1_000;
+    const now = vi.spyOn(Date, "now")
+      .mockReturnValueOnce(expiry - 1)
+      .mockReturnValue(expiry);
+
+    await executeTunnelReplay(stubTunnelReplayCommand({ expires_at: new Date(expiry).toISOString() }), targetUrl, client);
+
+    expect(forwardToLocalhost).not.toHaveBeenCalled();
+    now.mockRestore();
+  });
+});
+
+describe("reportTunnelReplayResultWithRetry", () => {
+  it("retries a transient result-report failure with the same payload", async () => {
+    const client = {
+      reportTunnelReplayResult: vi.fn()
+        .mockRejectedValueOnce(new Error("temporary outage"))
+        .mockResolvedValueOnce(undefined),
+    } as unknown as ApiClient;
+    const payload = { command_id: "cmd_123" };
+
+    await reportTunnelReplayResultWithRetry(client, payload, Date.now() + 1_000);
+
+    expect(client.reportTunnelReplayResult).toHaveBeenCalledTimes(2);
+    expect(client.reportTunnelReplayResult).toHaveBeenNthCalledWith(1, payload);
+    expect(client.reportTunnelReplayResult).toHaveBeenNthCalledWith(2, payload);
+  });
+
+  it("does not retry a definitive client error", async () => {
+    const client = {
+      reportTunnelReplayResult: vi.fn().mockRejectedValue(new ApiError(422, "invalid result")),
+    } as unknown as ApiClient;
+
+    await reportTunnelReplayResultWithRetry(client, { command_id: "cmd_123" }, Date.now() + 1_000);
+
+    expect(client.reportTunnelReplayResult).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -161,7 +325,26 @@ describe("runCatchUp", () => {
     });
 
     expect(forwardToLocalhost).toHaveBeenCalledTimes(1);
-    expect(forwardToLocalhost).toHaveBeenCalledWith(missedNew, targetUrl);
+    expect(forwardToLocalhost).toHaveBeenCalledWith(missedNew, targetUrl, null);
+  });
+
+  it("drains without capturing responses for negotiated V1 forwarding", async () => {
+    const missed = stubMissedWebhook({ id: "wr_v1" });
+    const { forwardToLocalhost } = await import("./forwarder.js");
+
+    await runCatchUp(
+      vi.fn().mockResolvedValue([missed]),
+      createDeliveryTracker(),
+      [endpoint],
+      targetUrl,
+      null,
+      { mode: "anonymous", tunnelKey: "tkey_x", endpointId: "ep_123" },
+      undefined,
+      undefined,
+      { protocol: { delivery_report_version: 1, evidence_body_limit: 3, capabilities: [] } }
+    );
+
+    expect(forwardToLocalhost).toHaveBeenCalledWith(missed, targetUrl, null);
   });
 
   it("deduplicates already-forwarded IDs", async () => {
@@ -336,8 +519,114 @@ describe("durable catch-up modes", () => {
 
     expect(client.getGapRequests).toHaveBeenNthCalledWith(1, ["ep_123"], "tgap_123", undefined);
     expect(client.getGapRequests).toHaveBeenNthCalledWith(2, ["ep_123"], "tgap_123", "page-2");
-    expect(forwardToLocalhost).toHaveBeenNthCalledWith(1, older, "http://localhost:3000");
-    expect(forwardToLocalhost).toHaveBeenNthCalledWith(2, newer, "http://localhost:3000");
+    expect(forwardToLocalhost).toHaveBeenNthCalledWith(1, older, "http://localhost:3000", null);
+    expect(forwardToLocalhost).toHaveBeenNthCalledWith(2, newer, "http://localhost:3000", null);
+  });
+
+  it("pauses and retries a rate-limited report without resending localhost", async () => {
+    vi.useFakeTimers();
+    const reportDelivery = vi.fn()
+      .mockRejectedValueOnce(new ApiError(429, "rate limited", 1_000))
+      .mockResolvedValueOnce(undefined);
+    const client = stubRecoveryClient({
+      reportDelivery,
+      reportGapRecovery: vi.fn().mockResolvedValue(stubGap({ status: "recovered" })),
+    });
+    const { forwardToLocalhost } = await import("./forwarder.js");
+
+    const recovery = runConnectionCatchUp(
+      vi.fn().mockResolvedValue([]),
+      createDeliveryTracker(),
+      [endpoint],
+      "http://localhost:3000",
+      client,
+      auth,
+      "all"
+    );
+    await vi.runAllTimersAsync();
+    await recovery;
+
+    expect(forwardToLocalhost).toHaveBeenCalledTimes(1);
+    expect(reportDelivery).toHaveBeenCalledTimes(2);
+    expect(reportDelivery).toHaveBeenNthCalledWith(2, reportDelivery.mock.calls[0][0]);
+    expect(client.reportGapRecovery).toHaveBeenCalledWith("tgap_123", {
+      outcome: "completed",
+      attempted_count: 1,
+      succeeded_count: 1,
+      failed_count: 0,
+    });
+    vi.useRealTimers();
+  });
+
+  it("resumes gap paging and completion after control requests are rate limited", async () => {
+    vi.useFakeTimers();
+    const getGapRequests = vi.fn()
+      .mockRejectedValueOnce(new ApiError(429, "rate limited", 4_000))
+      .mockResolvedValueOnce({
+        data: [stubMissedWebhook({ requested_at: "2026-07-11T12:00:00Z" })],
+        meta: { next_cursor: null },
+      });
+    const reportGapRecovery = vi.fn()
+      .mockRejectedValueOnce(new ApiError(429, "rate limited", 2_000))
+      .mockResolvedValueOnce(stubGap({ status: "recovered" }));
+    const client = stubRecoveryClient({ getGapRequests, reportGapRecovery });
+    const { forwardToLocalhost } = await import("./forwarder.js");
+
+    const recovery = runConnectionCatchUp(
+      vi.fn().mockResolvedValue([]),
+      createDeliveryTracker(),
+      [endpoint],
+      "http://localhost:3000",
+      client,
+      auth,
+      "all"
+    );
+    await vi.runAllTimersAsync();
+    await recovery;
+
+    expect(getGapRequests).toHaveBeenCalledTimes(2);
+    expect(forwardToLocalhost).toHaveBeenCalledTimes(1);
+    expect(client.reportDelivery).toHaveBeenCalledTimes(1);
+    expect(reportGapRecovery).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("recovers multiple unresolved gaps in one catch-up run", async () => {
+    const firstGap = stubGap({ id: "tgap_first" });
+    const secondGap = stubGap({
+      id: "tgap_second",
+      started_at: "2026-07-18T12:00:00Z",
+      detected_at: "2026-07-18T12:05:00Z",
+      reconnected_at: "2026-07-19T12:00:00Z",
+    });
+    const client = stubRecoveryClient({
+      getTunnelGaps: vi.fn().mockResolvedValue([firstGap, secondGap]),
+      getGapRequests: vi.fn()
+        .mockResolvedValueOnce({
+          data: [stubMissedWebhook({ id: "wr_first", requested_at: "2026-07-11T12:00:00Z" })],
+          meta: { next_cursor: null },
+        })
+        .mockResolvedValueOnce({
+          data: [stubMissedWebhook({ id: "wr_second", requested_at: "2026-07-18T18:00:00Z" })],
+          meta: { next_cursor: null },
+        }),
+      reportGapRecovery: vi.fn().mockResolvedValue(stubGap({ status: "recovered" })),
+    });
+
+    await runConnectionCatchUp(
+      vi.fn().mockResolvedValue([]),
+      createDeliveryTracker(),
+      [endpoint],
+      "http://localhost:3000",
+      client,
+      auth,
+      "all"
+    );
+
+    expect(client.getGapRequests).toHaveBeenNthCalledWith(1, ["ep_123"], "tgap_first", undefined);
+    expect(client.getGapRequests).toHaveBeenNthCalledWith(2, ["ep_123"], "tgap_second", undefined);
+    expect(client.reportGapRecovery).toHaveBeenCalledWith("tgap_first", expect.objectContaining({ outcome: "completed" }));
+    expect(client.reportGapRecovery).toHaveBeenCalledWith("tgap_second", expect.objectContaining({ outcome: "completed" }));
   });
 
   it("reports accurate partial counts for localhost failures", async () => {

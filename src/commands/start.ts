@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getStoredHost, ensureAuthenticatedToken } from "../lib/config.js";
+import { getStoredHost, ensureAuthenticatedToken, getInstallationIdentity } from "../lib/config.js";
 import { getHost, getBaseUrl } from "../lib/constants.js";
 import { ApiClient, createAnonymousSignatureConfig, type EndpointData } from "../lib/api-client.js";
 import type { AuthMode } from "../lib/cable-client.js";
@@ -26,6 +26,7 @@ export interface StartOptions {
   authCode?: string;
   browser?: boolean;
   catchUp?: string;
+  clientName?: string;
 }
 
 function generateSecret(): string {
@@ -37,6 +38,7 @@ export async function startCommand(
   options: StartOptions
 ): Promise<void> {
   const host = options.host || getStoredHost() || getHost();
+  getInstallationIdentity(options.clientName);
   const catchUpMode = resolveCatchUpMode(options.catchUp);
 
   // Validate --provider

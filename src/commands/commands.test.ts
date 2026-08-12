@@ -11,6 +11,10 @@ vi.mock("../lib/config.js", () => ({
   clearConfig: vi.fn(),
   getConfigPath: vi.fn(() => "/tmp/test-config.json"),
   resolveToken: vi.fn(),
+  getInstallationIdentity: vi.fn(() => ({
+    installationId: "installation-test-123",
+    clientName: "test-client",
+  })),
   ensureAuthenticatedToken: (...args: any[]) => mockEnsureAuthenticatedToken(...args),
 }));
 

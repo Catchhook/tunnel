@@ -112,6 +112,7 @@ program
   .option("--auth-code <code>", "One-time auth code from /auth/cli")
   .option("--no-browser", "Don't try to open browser for auto-auth")
   .option("--catch-up <mode>", "Recovery mode: prompt, all, recent, or none")
+  .option("--client-name <name>", "Persistent name for this CLI installation")
   .action(async (target, options) => {
     ui.banner(VERSION);
     await startCommand(target, options);

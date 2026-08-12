@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import Conf from "conf";
 import type { AuthIdentity } from "./api-client.js";
 import { ApiClient } from "./api-client.js";
@@ -9,11 +10,20 @@ import * as ui from "./ui.js";
 interface CatchHookConfig {
   token?: string;
   host?: string;
+  installationId?: string;
+  clientName?: string;
+  replayCommandJournal?: Record<string, number>;
 }
 
 const CONF_SCHEMA = {
   token: { type: "string" as const },
   host: { type: "string" as const },
+  installationId: { type: "string" as const },
+  clientName: { type: "string" as const },
+  replayCommandJournal: {
+    type: "object" as const,
+    additionalProperties: { type: "number" as const },
+  },
 };
 
 function createConf(): Conf<CatchHookConfig> {
@@ -94,6 +104,37 @@ export function clearConfig(): void {
 
 export function getConfigPath(): string {
   return config.path;
+}
+
+export function getInstallationIdentity(nameOverride?: string): { installationId: string; clientName: string } {
+  let installationId = config.get("installationId");
+  if (!installationId) {
+    installationId = randomUUID();
+    config.set("installationId", installationId);
+  }
+
+  if (nameOverride) config.set("clientName", nameOverride.slice(0, 80));
+  let clientName = config.get("clientName");
+  if (!clientName) {
+    clientName = os.hostname().slice(0, 80) || "Local client";
+    config.set("clientName", clientName);
+  }
+  return { installationId, clientName };
+}
+
+export function claimReplayCommand(commandId: string, expiresAt: string): boolean {
+  const now = Date.now();
+  const expiry = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiry) || expiry <= now) return false;
+
+  const journal = config.get("replayCommandJournal") || {};
+  for (const [id, expiry] of Object.entries(journal)) {
+    if (expiry <= now) delete journal[id];
+  }
+  if (journal[commandId]) return false;
+  journal[commandId] = expiry;
+  config.set("replayCommandJournal", journal);
+  return true;
 }
 
 export type TokenSource = "flag" | "env" | "stored" | "none";

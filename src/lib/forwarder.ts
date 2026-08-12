@@ -23,39 +23,49 @@ export type FailureCategory =
   | "http_error"
   | "unknown_error";
 
+export interface ResponseEvidence {
+  contentType: string | null;
+  headers: Record<string, string>;
+  body: string | null;
+  bodyEncoding: "utf8" | "base64" | null;
+  declaredContentLength: number | null;
+  decodedBytesObserved: number;
+  retainedBytes: number;
+  captureComplete: boolean;
+  truncationReason: "size_limit" | "timeout" | "stream_error" | null;
+}
+
 export interface ForwardResult {
   statusCode: number;
   statusText: string;
   responseTimeMs: number;
   error?: string;
   failureCategory?: FailureCategory;
+  resolvedUrl: string;
+  evidence: ResponseEvidence;
 }
+
+const RESPONSE_HEADER_ALLOWLIST = new Set([
+  "content-type", "content-length", "location", "x-request-id", "x-correlation-id",
+  "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset",
+]);
+const MAX_RESPONSE_HEADERS_BYTES = 16 * 1024;
 
 // HTTP methods that MUST NOT have a request body (Node fetch throws otherwise)
 const BODYLESS_METHODS = new Set(["GET", "HEAD"]);
 
 export async function forwardToLocalhost(
   data: WebhookData,
-  targetUrl: string
+  targetUrl: string,
+  evidenceBodyLimit: number | null = 64 * 1024,
+  timeoutMs = 30_000,
+  redirect: RequestRedirect = "follow"
 ): Promise<ForwardResult> {
   const start = performance.now();
+  let url: URL | undefined;
 
   try {
-    // Build URL: append the original webhook path so localhost routing works
-    const url = new URL(targetUrl);
-    if (data.path) {
-      // Resolve the webhook path relative to whatever base path targetUrl has.
-      // e.g. targetUrl = "http://localhost:3000/api" + path = "/webhooks/stripe"
-      //   -> "http://localhost:3000/api/webhooks/stripe"
-      const base = url.pathname.replace(/\/+$/, ""); // trim trailing slash
-      url.pathname = base + data.path;
-    }
-    if (data.query_parameters) {
-      for (const [key, value] of Object.entries(data.query_parameters)) {
-        url.searchParams.set(key, value);
-      }
-    }
-
+    url = resolveTargetUrl(data, targetUrl);
     // Build headers, stripping hop-by-hop
     const headers: Record<string, string> = {};
     if (data.headers) {
@@ -90,13 +100,14 @@ export async function forwardToLocalhost(
       method,
       headers,
       body,
+      redirect,
       // @ts-ignore -- Node.js fetch supports this
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
-    // Drain the response body to release the underlying socket/connection.
-    // We only care about the status; ignoring the body leaks connections.
-    await response.text().catch(() => {});
+    const evidence = evidenceBodyLimit == null
+      ? await drainResponse(response)
+      : await captureResponseEvidence(response, evidenceBodyLimit);
 
     const elapsed = Math.round(performance.now() - start);
 
@@ -104,6 +115,8 @@ export async function forwardToLocalhost(
       statusCode: response.status,
       statusText: response.statusText,
       responseTimeMs: elapsed,
+      resolvedUrl: url.toString(),
+      evidence,
     };
 
     if (response.status < 200 || response.status >= 300) {
@@ -113,13 +126,14 @@ export async function forwardToLocalhost(
     return result;
   } catch (err: any) {
     const elapsed = Math.round(performance.now() - start);
+    const resolvedUrl = url?.toString() ?? targetUrl;
 
     if (err.name === "AbortError" || err.code === "ABORT_ERR") {
-      return { statusCode: 0, statusText: "Timeout", responseTimeMs: elapsed, error: "Request timed out (30s)", failureCategory: "timeout" as const };
+      return failureResult(resolvedUrl, elapsed, "Timeout", `Request timed out (${timeoutMs}ms)`, "timeout");
     }
 
     if (err.cause?.code === "ECONNREFUSED") {
-      return { statusCode: 0, statusText: "Connection Refused", responseTimeMs: elapsed, error: `Cannot connect to ${targetUrl}`, failureCategory: "connection_refused" as const };
+      return failureResult(resolvedUrl, elapsed, "Connection Refused", `Cannot connect to ${targetUrl}`, "connection_refused");
     }
 
     const message = err.message || "Unknown error";
@@ -131,8 +145,118 @@ export async function forwardToLocalhost(
       responseTimeMs: elapsed,
       error: message,
       failureCategory: category,
+      resolvedUrl,
+      evidence: emptyEvidence(),
     };
   }
+}
+
+async function drainResponse(response: Response): Promise<ResponseEvidence> {
+  if (response.body) {
+    const reader = response.body.getReader();
+    try {
+      while (!(await reader.read()).done) {
+        // Drain without retaining legacy/V1 response bodies so the connection can be reused.
+      }
+    } catch {
+      // Legacy forwarding historically reports the HTTP status even if draining fails.
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  return emptyEvidence();
+}
+
+export function resolveTargetUrl(data: WebhookData, targetUrl: string): URL {
+  const url = new URL(targetUrl);
+  if (data.path) {
+    const base = url.pathname.replace(/\/+$/, "");
+    url.pathname = base + data.path;
+  }
+  if (data.query_parameters) {
+    for (const [key, value] of Object.entries(data.query_parameters)) url.searchParams.set(key, value);
+  }
+  return url;
+}
+
+async function captureResponseEvidence(response: Response, limit: number): Promise<ResponseEvidence> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    const normalized = name.toLowerCase();
+    if (!RESPONSE_HEADER_ALLOWLIST.has(normalized) || Buffer.byteLength(value) > 4096) return;
+    const candidate = { ...headers, [normalized]: value };
+    if (Buffer.byteLength(JSON.stringify(candidate)) <= MAX_RESPONSE_HEADERS_BYTES) headers[normalized] = value;
+  });
+  const declared = parseNonnegativeInteger(response.headers.get("content-length"));
+  if (!response.body) return { ...emptyEvidence(), contentType: response.headers.get("content-type"), headers, declaredContentLength: declared, captureComplete: true };
+
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let retained = 0;
+  let observed = 0;
+  let complete = true;
+  let reason: ResponseEvidence["truncationReason"] = null;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      observed += chunk.length;
+      const remaining = limit - retained;
+      if (remaining > 0) {
+        const piece = chunk.subarray(0, remaining);
+        chunks.push(piece);
+        retained += piece.length;
+      }
+      if (observed > limit) {
+        observed = limit + 1;
+        complete = false;
+        reason = "size_limit";
+        await reader.cancel().catch(() => {});
+        break;
+      }
+    }
+  } catch (error: any) {
+    complete = false;
+    reason = error?.name === "AbortError" || error?.name === "TimeoutError" ? "timeout" : "stream_error";
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = Buffer.concat(chunks, retained);
+  let body: string;
+  let bodyEncoding: "utf8" | "base64";
+  try {
+    body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    bodyEncoding = "utf8";
+  } catch {
+    body = bytes.toString("base64");
+    bodyEncoding = "base64";
+  }
+  return {
+    contentType: response.headers.get("content-type"), headers, body, bodyEncoding,
+    declaredContentLength: declared, decodedBytesObserved: observed, retainedBytes: bytes.length,
+    captureComplete: complete, truncationReason: reason,
+  };
+}
+
+function emptyEvidence(): ResponseEvidence {
+  return {
+    contentType: null, headers: {}, body: null, bodyEncoding: null,
+    declaredContentLength: null, decodedBytesObserved: 0, retainedBytes: 0,
+    captureComplete: false, truncationReason: null,
+  };
+}
+
+function failureResult(resolvedUrl: string, elapsed: number, statusText: string, error: string, failureCategory: FailureCategory): ForwardResult {
+  return { statusCode: 0, statusText, responseTimeMs: elapsed, error, failureCategory, resolvedUrl, evidence: emptyEvidence() };
+}
+
+function parseNonnegativeInteger(value: string | null): number | null {
+  if (value == null || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 function classifyError(err: any): FailureCategory {
